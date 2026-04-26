@@ -28,11 +28,15 @@
  *        --container-image <name>          (default: pi-sandbox:latest)
  *        --container-net                   (allow outbound network)
  *        --container-keep                  (don't stop the container on exit)
+ *        --container-mount-skills           (mount ~/.agents/skills & ~/.pi/agent/skills read-only at /skills; default: on)
+ *        --container-mount-paths <paths>    (comma-separated extra host dirs to mount at /skills/<basename>)
  *        --no-container, --noc             (bypass entirely)
  */
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import {
 	type BashOperations,
@@ -61,11 +65,20 @@ interface Runtime {
 	exists(image: string): Promise<boolean>;
 }
 
+interface MountSpec {
+	/** Absolute path on the host. */
+	source: string;
+	/** Absolute path inside the container. */
+	target: string;
+}
+
 interface RunArgs {
 	name: string;
 	image: string;
 	hostCwd: string;
 	allowNetwork: boolean;
+	/** Extra read-only bind mounts (e.g. skill directories). */
+	extraMounts?: MountSpec[];
 }
 
 function randomSuffix(): string {
@@ -139,7 +152,7 @@ function appleRuntime(): Runtime {
 			spawnSync(bin, ["stop", name], { stdio: "ignore" });
 			forceDelete(name);
 		},
-		run: async ({ name, image, hostCwd, allowNetwork }) => {
+		run: async ({ name, image, hostCwd, allowNetwork, extraMounts }) => {
 			const buildArgs = (n: string): string[] => {
 				const a: string[] = [
 					"run",
@@ -152,6 +165,11 @@ function appleRuntime(): Runtime {
 					"--mount", `type=bind,source=${hostCwd},target=/workspace`,
 					"-w", "/workspace",
 				];
+				if (extraMounts) {
+					for (const m of extraMounts) {
+						a.push("--mount", `type=bind,source=${m.source},target=${m.target},readonly`);
+					}
+				}
 				if (!allowNetwork) a.push("--no-dns"); // best-effort: no name resolution
 				a.push(image, "sleep", "infinity");
 				return a;
@@ -205,7 +223,7 @@ function dockerRuntime(): Runtime {
 		stop: (name) => {
 			spawnSync(bin, ["stop", name], { stdio: "ignore" });
 		},
-		run: async ({ name, image, hostCwd, allowNetwork }) => {
+		run: async ({ name, image, hostCwd, allowNetwork, extraMounts }) => {
 			const args: string[] = [
 				"run",
 				"-d",
@@ -220,6 +238,11 @@ function dockerRuntime(): Runtime {
 				"-v", `${hostCwd}:/workspace`,
 				"-w", "/workspace",
 			];
+			if (extraMounts) {
+				for (const m of extraMounts) {
+					args.push("-v", `${m.source}:${m.target}:ro`);
+				}
+			}
 			if (!allowNetwork) args.push("--network", "none");
 			args.push(image, "sleep", "infinity");
 			const r = await spawnWithTimeout(bin, args, 30000);
@@ -243,6 +266,8 @@ interface Sandbox {
 	name: string;
 	hostCwd: string;
 	keep: boolean;
+	/** Mounts applied when the container was created. */
+	mounts: MountSpec[];
 }
 
 let sandbox: Sandbox | null = null;
@@ -253,13 +278,29 @@ const getSbx = () => sandbox;
 // ---------------------------------------------------------------------------
 
 const REMOTE_ROOT = "/workspace";
+const SKILLS_ROOT = "/skills";
 
-function toRemote(hostPath: string, hostCwd: string): string {
+/** Return the container-side path if it falls under a known extra mount, otherwise null. */
+function resolveExtraMountPath(containerPath: string, mounts: MountSpec[]): string | null {
+	for (const m of mounts) {
+		if (containerPath === m.target || containerPath.startsWith(`${m.target}/`)) {
+			return containerPath;
+		}
+	}
+	return null;
+}
+
+function toRemote(hostPath: string, hostCwd: string, mounts?: MountSpec[]): string {
 	// If the path is already a container-absolute path (/workspace/...),
 	// accept it directly — the agent may be thinking in container space
 	// because the system prompt shows CWD as /workspace.
 	if (hostPath === REMOTE_ROOT || hostPath.startsWith(`${REMOTE_ROOT}/`)) {
 		return hostPath;
+	}
+	// Also accept paths under any extra mount target (e.g. /skills/...)
+	if (mounts) {
+		const resolved = resolveExtraMountPath(hostPath, mounts);
+		if (resolved) return resolved;
 	}
 	const abs = resolvePath(hostCwd, hostPath);
 	if (abs !== hostCwd && !abs.startsWith(`${hostCwd}/`)) {
@@ -269,6 +310,19 @@ function toRemote(hostPath: string, hostCwd: string): string {
 	}
 	const rel = abs === hostCwd ? "" : abs.slice(hostCwd.length + 1);
 	return rel ? `${REMOTE_ROOT}/${rel}` : REMOTE_ROOT;
+}
+
+/**
+ * Check whether a container-side path falls under an extra (read-only) mount.
+ * Used to reject write/edit operations against skill directories.
+ */
+function isReadOnlyMount(containerPath: string, mounts: MountSpec[]): boolean {
+	for (const m of mounts) {
+		if (containerPath === m.target || containerPath.startsWith(`${m.target}/`)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 function shq(s: string): string {
@@ -355,11 +409,11 @@ function execStream(
 
 function readOps(sbx: Sandbox): ReadOperations {
 	return {
-		readFile: (p) => execCapture(sbx, `cat ${shq(toRemote(p, sbx.hostCwd))}`),
-		access: (p) => execCapture(sbx, `test -r ${shq(toRemote(p, sbx.hostCwd))}`).then(() => {}),
+		readFile: (p) => execCapture(sbx, `cat ${shq(toRemote(p, sbx.hostCwd, sbx.mounts))}`),
+		access: (p) => execCapture(sbx, `test -r ${shq(toRemote(p, sbx.hostCwd, sbx.mounts))}`).then(() => {}),
 		detectImageMimeType: async (p) => {
 			try {
-				const r = await execCapture(sbx, `file --mime-type -b ${shq(toRemote(p, sbx.hostCwd))}`);
+				const r = await execCapture(sbx, `file --mime-type -b ${shq(toRemote(p, sbx.hostCwd, sbx.mounts))}`);
 				const m = r.toString().trim();
 				return ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(m) ? m : null;
 			} catch {
@@ -372,12 +426,20 @@ function readOps(sbx: Sandbox): ReadOperations {
 function writeOps(sbx: Sandbox): WriteOperations {
 	return {
 		writeFile: async (p, content) => {
+			const remote = toRemote(p, sbx.hostCwd, sbx.mounts);
+			if (isReadOnlyMount(remote, sbx.mounts)) {
+				throw new Error(`sandbox: refusing to write to ${remote}: read-only skill mount`);
+			}
 			const buf = typeof content === "string" ? Buffer.from(content) : Buffer.from(content);
 			const b64 = buf.toString("base64");
-			await execCapture(sbx, `printf %s ${shq(b64)} | base64 -d > ${shq(toRemote(p, sbx.hostCwd))}`);
+			await execCapture(sbx, `printf %s ${shq(b64)} | base64 -d > ${shq(remote)}`);
 		},
 		mkdir: async (dir) => {
-			await execCapture(sbx, `mkdir -p ${shq(toRemote(dir, sbx.hostCwd))}`);
+			const remote = toRemote(dir, sbx.hostCwd, sbx.mounts);
+			if (isReadOnlyMount(remote, sbx.mounts)) {
+				throw new Error(`sandbox: refusing to mkdir in ${remote}: read-only skill mount`);
+			}
+			await execCapture(sbx, `mkdir -p ${shq(remote)}`);
 		},
 	};
 }
@@ -385,16 +447,77 @@ function writeOps(sbx: Sandbox): WriteOperations {
 function editOps(sbx: Sandbox): EditOperations {
 	const r = readOps(sbx);
 	const w = writeOps(sbx);
-	return { readFile: r.readFile, access: r.access, writeFile: w.writeFile };
+	return {
+		readFile: r.readFile,
+		access: r.access,
+		writeFile: async (p, content) => {
+			const remote = toRemote(p, sbx.hostCwd, sbx.mounts);
+			if (isReadOnlyMount(remote, sbx.mounts)) {
+				throw new Error(`sandbox: refusing to edit ${remote}: read-only skill mount`);
+			}
+			return w.writeFile(p, content);
+		},
+	};
 }
 
 function bashOps(sbx: Sandbox): BashOperations {
 	return {
 		exec: (command, cwd, opts) => {
-			const remoteCwd = toRemote(cwd, sbx.hostCwd);
+			const remoteCwd = toRemote(cwd, sbx.hostCwd, sbx.mounts);
 			return execStream(sbx, `cd ${shq(remoteCwd)} && ${command}`, opts);
 		},
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Skill directory discovery
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan the host filesystem for agent skill directories and return mount specs.
+ *
+ * Looks under the following host directories (in order):
+ *   - Any additional paths passed via --container-mount-skills (comma-separated)
+ *   - $HOME/.agents/skills/
+ *   - $HOME/.pi/agent/skills/
+ *
+ * Each immediate subdirectory that exists on disk becomes a read-only bind mount
+ * at /skills/<name> inside the container.
+ */
+function discoverSkillDirs(additionalPaths?: string[]): MountSpec[] {
+	const home = homedir();
+	const skillRoots = [
+		...additionalPaths ?? [],
+		resolvePath(home, ".agents", "skills"),
+		resolvePath(home, ".pi", "agent", "skills"),
+	];
+
+	const mounts: MountSpec[] = [];
+
+	for (const root of skillRoots) {
+		if (!existsSync(root)) continue;
+		try {
+			const entries = readdirSync(root);
+			for (const entry of entries) {
+				const full = resolvePath(root, entry);
+				try {
+					const st = statSync(full);
+					if (!st.isDirectory()) continue;
+				} catch {
+					continue;
+				}
+				// Avoid duplicate mount targets if the same skill name exists
+				// under multiple roots — first one wins.
+				const target = `${SKILLS_ROOT}/${entry}`;
+				if (mounts.some((m) => m.target === target)) continue;
+				mounts.push({ source: full, target });
+			}
+		} catch {
+			// Permission or I/O error — skip silently.
+		}
+	}
+
+	return mounts;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +557,15 @@ export default function (pi: ExtensionAPI) {
 		description: "Don't stop the sandbox container when pi exits (for debugging)",
 		type: "boolean",
 		default: false,
+	});
+	pi.registerFlag("container-mount-skills", {
+		description: "Mount agent skill directories read-only into the container at /skills (default: on)",
+		type: "boolean",
+		default: true,
+	});
+	pi.registerFlag("container-mount-paths", {
+		description: "Comma-separated list of additional host directories to mount read-only at /skills/<basename>",
+		type: "string",
 	});
 
 	const localCwd = process.cwd();
@@ -489,10 +621,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event) => {
 		const sbx = getSbx();
 		if (!sbx) return;
+
+		const skillInfo = sbx.mounts.length
+			? `Agent skills are mounted read-only at ${SKILLS_ROOT}/ (e.g. ${sbx.mounts.map((m) => m.target).join(", ")}). Read skill files via /skills/<name>/SKILL.md. Writing to /skills/ is forbidden.`
+			: "No skill directories are mounted.";
+
 		return {
 			systemPrompt: event.systemPrompt.replace(
 				`Current working directory: ${localCwd}`,
-				`Current working directory: ${REMOTE_ROOT} (sandboxed in ${sbx.runtime.kind} container ${sbx.name}, host cwd ${localCwd} mounted read-write)`,
+				[
+					`Current working directory: ${REMOTE_ROOT} (sandboxed in ${sbx.runtime.kind} container ${sbx.name}, host cwd ${localCwd} mounted read-write)`,
+					skillInfo,
+				].join("\n"),
 			),
 		};
 	});
@@ -506,6 +646,12 @@ export default function (pi: ExtensionAPI) {
 			const image = (pi.getFlag("container-image") as string) || "pi-sandbox:latest";
 			const allowNetwork = pi.getFlag("container-net") as boolean;
 			const keep = pi.getFlag("container-keep") as boolean;
+			const mountSkills = pi.getFlag("container-mount-skills") as boolean;
+			const extraPathsRaw = pi.getFlag("container-mount-paths") as string | undefined;
+			const extraPaths = extraPathsRaw ? extraPathsRaw.split(",").map((p) => p.trim()).filter(Boolean) : undefined;
+
+			// Discover skill directories on the host.
+			const skillMounts = mountSkills ? discoverSkillDirs(extraPaths) : [];
 
 			if (!(await runtime.exists(image))) {
 				ctx.ui.notify(
@@ -518,8 +664,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const requestedName = `pi-sbx-${randomSuffix()}`;
-			const actualName = await runtime.run({ name: requestedName, image, hostCwd: localCwd, allowNetwork });
-			sandbox = { runtime, name: actualName, hostCwd: localCwd, keep };
+			const actualName = await runtime.run({ name: requestedName, image, hostCwd: localCwd, allowNetwork, extraMounts: skillMounts.length ? skillMounts : undefined });
+			sandbox = { runtime, name: actualName, hostCwd: localCwd, keep, mounts: skillMounts };
 
 			// Belt-and-braces cleanup for ungraceful exits (Apple `container`
 			// has no equivalent of docker --rm on host-side kill). Docker's
@@ -548,7 +694,7 @@ export default function (pi: ExtensionAPI) {
 				"sandbox",
 				ctx.ui.theme.fg("accent", `🛡  ${runtime.kind}:${actualName} (net=${allowNetwork ? "on" : "off"})`),
 			);
-			ctx.ui.notify(`Sandbox up: ${runtime.kind} ${actualName}\n${ok}`, "info");
+			ctx.ui.notify(`Sandbox up: ${runtime.kind} ${actualName}\n${ok}${skillMounts.length ? `\nSkills mounted: ${skillMounts.map((m) => m.target).join(", ")}` : ""}`, "info");
 		} catch (e) {
 			sandbox = null;
 			ctx.ui.notify(`Sandbox init failed: ${e instanceof Error ? e.message : String(e)}`, "error");
