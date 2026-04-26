@@ -255,6 +255,12 @@ const getSbx = () => sandbox;
 const REMOTE_ROOT = "/workspace";
 
 function toRemote(hostPath: string, hostCwd: string): string {
+	// If the path is already a container-absolute path (/workspace/...),
+	// accept it directly — the agent may be thinking in container space
+	// because the system prompt shows CWD as /workspace.
+	if (hostPath === REMOTE_ROOT || hostPath.startsWith(`${REMOTE_ROOT}/`)) {
+		return hostPath;
+	}
 	const abs = resolvePath(hostCwd, hostPath);
 	if (abs !== hostCwd && !abs.startsWith(`${hostCwd}/`)) {
 		throw new Error(
