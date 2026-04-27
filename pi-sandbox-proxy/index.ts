@@ -1,0 +1,250 @@
+/**
+ * pi-sandbox-proxy
+ * ----------------
+ * Security proxy extension for pi coding-agent.
+ *
+ * Intercepts every bash command before execution, identifies network operations
+ * (package installs, curl/wget, git clone), runs them through a security pipeline:
+ *   1. Shell metacharacter / encoding detection → BLOCK
+ *   2. Dangerous patterns (curl|sh, env exfil) → BLOCK
+ *   3. Version pin enforcement → BLOCK (unpinned) / MUTATE (ranges)
+ *   4. Lifecycle script blocking → MUTATE (--ignore-scripts)
+ *   5. Typosquatting detection → WARN in approval UI
+ *   6. Approval cache lookup → PASS if not expired
+ *   7. Vulnerability scan (OSV.dev API) → show in UI, block CVSS≥9
+ *   8. Interactive approval (7-day / 30-day options)
+ *   9. Proxy whitelist update
+ *
+ * Post-execution: scans tool results for prompt injection attempts.
+ *
+ * Works standalone (host-level auditing) or alongside pi-sandbox (container-aware).
+ */
+
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	BashToolCallEvent,
+	ToolResultEvent,
+} from "@mariozechner/pi-coding-agent";
+import { isBashToolResult } from "@mariozechner/pi-coding-agent";
+
+import { loadConfig } from "./src/config/loader";
+import { parseCommand } from "./src/parsers/index";
+import { ApprovalStore } from "./src/approval/store";
+import { SecurityPipeline } from "./src/security/pipeline";
+import { detectPromptInjection } from "./src/detection/prompt-injection";
+import { AuditLog } from "./src/util/log";
+
+const SECURITY_APPENDIX = `
+
+## Security Proxy Active
+
+All network operations are monitored by pi-sandbox-proxy:
+- Package installations require exact version pins (e.g., npm install pkg@1.2.3)
+- Lifecycle scripts (postinstall, preinstall) are automatically blocked
+- All network requests require user approval
+- Never pipe network content to shell execution (curl | bash is blocked)
+- Vulnerability scanning is performed on all installed packages
+- Typosquatting detection is active
+
+When you need to install packages:
+1. Always specify exact versions: npm install package@x.y.z
+2. Prefer npm ci over npm install for deterministic builds
+3. Report any installation failures clearly so the user can diagnose
+`;
+
+export default function (pi: ExtensionAPI) {
+	const config = loadConfig(process.cwd());
+	const agentDir = getAgentDir();
+	const store = new ApprovalStore(agentDir);
+	const auditLog = new AuditLog(agentDir);
+	const pipeline = new SecurityPipeline(config, store, auditLog);
+
+	let pendingApprovals = 0;
+	const MAX_PENDING_APPROVALS = 20;
+
+	// --- Flags ---
+
+	pi.registerFlag("proxy", {
+		description: "Enable security proxy for network operations (default: on)",
+		type: "boolean",
+		default: true,
+	});
+	pi.registerFlag("no-proxy", {
+		description: "Disable the security proxy entirely",
+		type: "boolean",
+		default: false,
+	});
+	pi.registerFlag("proxy-strict", {
+		description: "Block all network unless explicitly approved (no default domains)",
+		type: "boolean",
+		default: false,
+	});
+	pi.registerFlag("proxy-approve-max-days", {
+		description: "Maximum approval duration in days (default: 30)",
+		type: "string",
+		default: "30",
+	});
+	pi.registerFlag("proxy-deep-scan", {
+		description: "Enable deep vulnerability scanning of transitive dependencies",
+		type: "boolean",
+		default: false,
+	});
+	pi.registerFlag("proxy-auto-approve", {
+		description: "Auto-approve packages with zero known vulnerabilities (for CI/non-interactive)",
+		type: "boolean",
+		default: false,
+	});
+
+	// --- Primary gate: intercept every bash tool_call ---
+
+	pi.on("tool_call", async (event, ctx) => {
+		if (!pi.getFlag("proxy") || pi.getFlag("no-proxy")) return;
+		if (event.toolName !== "bash") return;
+
+		const cmdEvent = event as BashToolCallEvent;
+		const command = cmdEvent.input.command;
+		const parsed = parseCommand(command);
+
+		if (!parsed.hasNetworkActivity) return;
+
+		if (pendingApprovals >= MAX_PENDING_APPROVALS) {
+			return {
+				block: true,
+				reason: `Security proxy: too many pending approvals (${MAX_PENDING_APPROVALS}). Address existing approvals before continuing.`,
+			};
+		}
+
+		const result = await pipeline.check(parsed, ctx.ui);
+
+		if (result.blocked) {
+			auditLog.log({ action: "blocked", subject: parsed.raw, reason: result.reason });
+			return { block: true, reason: result.reason };
+		}
+
+		if (result.mutatedCommand) {
+			cmdEvent.input.command = result.mutatedCommand;
+			auditLog.log({
+				action: "mutated",
+				subject: parsed.raw,
+				mutatedTo: result.mutatedCommand,
+				reason: result.reason ?? "lifecycle scripts blocked",
+			});
+		}
+
+		if (result.approved) {
+			pendingApprovals++;
+			auditLog.log({
+				action: "approved",
+				subject: parsed.kind === "package-install"
+					? parsed.packages.map((p: { name: string; version: string | null }) => `${p.name}@${p.version}`).join(", ")
+					: parsed.urls.join(", "),
+				source: result.approvalSource,
+			});
+		}
+	});
+
+	// --- Post-execution audit: prompt injection detection ---
+
+	pi.on("tool_result", async (event) => {
+		if (!pi.getFlag("proxy") || pi.getFlag("no-proxy")) return;
+		if (event.toolName !== "bash") return;
+
+		const resultEvent = event as ToolResultEvent;
+		if (!isBashToolResult(resultEvent)) return;
+
+		const output = resultEvent.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c: { text: string }) => c.text)
+			.join("\n");
+
+		if (!output) return;
+
+		const injections = detectPromptInjection(output);
+		if (injections.length > 0) {
+			auditLog.log({
+				action: "prompt-injection-detected",
+				subject: "tool_result",
+				matches: injections.map((i: { pattern: string }) => i.pattern),
+			});
+		}
+	});
+
+	// --- System prompt augmentation ---
+
+	pi.on("before_agent_start", async (event) => {
+		if (!pi.getFlag("proxy") || pi.getFlag("no-proxy")) return event;
+		return { systemPrompt: event.systemPrompt + SECURITY_APPENDIX };
+	});
+
+	// --- Slash commands ---
+
+	pi.registerCommand("proxy", {
+		description: "Show security proxy status (approvals, blocked count, config)",
+		handler: async (_args, ctx) => {
+			const approvals = store.list();
+			const active = approvals.filter((a: { expiresAt: number }) => a.expiresAt > Date.now());
+			ctx.ui.notify(
+				[
+					"Proxy Status:",
+					`  Mode: ${config.strictMode ? "strict" : "standard"}`,
+					`  Active approvals: ${active.length}`,
+					`  Max duration: ${config.maxApprovalDays} days`,
+					`  Deep scan: ${config.deepScan ? "on" : "off"}`,
+					active.length > 0
+						? `\n  Approved:\n${active.map((a: { subject: string; expiresAt: number }) => `    - ${a.subject} (expires ${new Date(a.expiresAt).toISOString()})`).join("\n")}`
+						: "",
+				].join("\n"),
+				"info",
+			);
+		},
+	});
+
+	pi.registerCommand("proxy-approve", {
+		description: "Pre-approve a package or domain for N days (usage: /proxy-approve <pkg@ver|domain> [days])",
+		handler: async (args, ctx) => {
+			const parts = args.trim().split(/\s+/);
+			const subject = parts[0];
+			if (!subject) {
+				ctx.ui.notify("Usage: /proxy-approve <package@version|domain> [days]", "warning");
+				return;
+			}
+			const days = Math.min(
+				parseInt(parts[1] || String(config.maxApprovalDays), 10),
+				config.maxApprovalDays,
+			);
+			store.add(subject, subject, days, "manual pre-approval");
+			ctx.ui.notify(`Approved "${subject}" for ${days} days`, "info");
+		},
+	});
+
+	pi.registerCommand("proxy-revoke", {
+		description: "Revoke a previously granted approval (usage: /proxy-revoke <subject>)",
+		handler: async (args, ctx) => {
+			const subject = args.trim();
+			if (!subject) {
+				ctx.ui.notify("Usage: /proxy-revoke <subject>", "warning");
+				return;
+			}
+			store.revoke(subject);
+			ctx.ui.notify(`Revoked approval for "${subject}"`, "info");
+		},
+	});
+
+	pi.registerCommand("proxy-audit", {
+		description: "Show recent security events from the audit log",
+		handler: async (_args, ctx) => {
+			const entries = auditLog.recent(20);
+			if (entries.length === 0) {
+				ctx.ui.notify("No audit entries yet.", "info");
+				return;
+			}
+			ctx.ui.notify(
+				entries.map((e: { ts: string; action: string; subject: string; reason?: string }) =>
+					`[${e.ts}] ${e.action}: ${e.subject}${e.reason ? ` (${e.reason})` : ""}`
+				).join("\n"),
+				"info",
+			);
+		},
+	});
+}

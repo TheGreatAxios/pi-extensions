@@ -11,6 +11,7 @@
  *   - No host secrets are mounted (no $HOME, ~/.ssh, ~/.aws, ~/.config, no
  *     SSH agent, no Docker socket).
  *   - Network is disabled by default; opt in with --container-net.
+ *     ⚠️  Apple container uses --no-dns + route deletion; Docker uses --network none (stronger).
  *   - Resource caps (2 CPUs / 2 GiB RAM) limit blast radius of runaway code.
  *
  * Path safety:
@@ -170,7 +171,7 @@ function appleRuntime(): Runtime {
 						a.push("--mount", `type=bind,source=${m.source},target=${m.target},readonly`);
 					}
 				}
-				if (!allowNetwork) a.push("--no-dns"); // best-effort: no name resolution
+				if (!allowNetwork) a.push("--no-dns"); // best-effort: blocks DNS; post-start lockdown below
 				a.push(image, "sleep", "infinity");
 				return a;
 			};
@@ -690,6 +691,43 @@ export default function (pi: ExtensionAPI) {
 
 			// Smoke test (10s timeout)
 			const ok = (await execCapture(sandbox, "id -un && pwd", 10000)).toString().trim();
+
+			// Post-start network lockdown for Apple containers.
+			// --no-dns only blocks DNS resolution; the container can still
+			// make outbound TCP/UDP connections by IP. We need a hard block.
+			if (!allowNetwork && runtime.kind === "apple") {
+				try {
+					// Delete the default route so no outbound traffic leaves the container.
+					// We run as uid 1000, but `ip` may be available and the container
+					// may allow NET_ADMIN. If this fails, we warn but don't block startup.
+					await execCapture(
+						sandbox,
+						"ip route del default 2>/dev/null; ip -6 route del default 2>/dev/null; echo done",
+						5000,
+					);
+					// Verify network is actually blocked: try to reach an external IP.
+					const probe = await execCapture(
+						sandbox,
+						"timeout 3 bash -c 'echo > /dev/tcp/1.1.1.1/443' 2>&1 || echo blocked",
+						5000,
+					);
+					if (!probe.toString().includes("blocked")) {
+						ctx.ui.notify(
+							"⚠️  Sandbox network lockdown FAILED — container may have outbound access. "
+								+ "Consider using Docker runtime (--container-runtime docker) for hard network isolation.",
+							"warn",
+						);
+					}
+				} catch {
+					// Non-fatal: route deletion may not work in all Apple container configs.
+					ctx.ui.notify(
+						"⚠️  Could not enforce network isolation in Apple container. "
+							+ "Use --container-runtime docker for guaranteed network blocking.",
+						"warn",
+					);
+				}
+			}
+
 			ctx.ui.setStatus(
 				"sandbox",
 				ctx.ui.theme.fg("accent", `🛡  ${runtime.kind}:${actualName} (net=${allowNetwork ? "on" : "off"})`),
