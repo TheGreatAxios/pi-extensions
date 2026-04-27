@@ -10,8 +10,9 @@
  *   - The agent runs as a non-root user (uid 1000) inside the container.
  *   - No host secrets are mounted (no $HOME, ~/.ssh, ~/.aws, ~/.config, no
  *     SSH agent, no Docker socket).
- *   - Network is disabled by default; opt in with --container-net.
- *     ⚠️  Apple container uses --no-dns + route deletion; Docker uses --network none (stronger).
+ *   - Network is enabled by default; the security proxy gates outbound traffic.
+ *     Disable with --no-container-net.
+ *     ⚠️  Apple container uses --no-dns + route deletion; Docker uses --network none (when disabled).
  *   - Resource caps (2 CPUs / 2 GiB RAM) limit blast radius of runaway code.
  *
  * Path safety:
@@ -28,6 +29,7 @@
  *        --container-runtime docker|apple  (default: auto-detect, prefer apple)
  *        --container-image <name>          (default: pi-sandbox:latest)
  *        --container-net                   (allow outbound network)
+ *        --prawl, --browser                 (alias for --container-net)
  *        --container-keep                  (don't stop the container on exit)
  *        --container-mount-skills           (mount ~/.agents/skills & ~/.pi/agent/skills read-only at /skills; default: on)
  *        --container-mount-paths <paths>    (comma-separated extra host dirs to mount at /skills/<basename>)
@@ -91,13 +93,46 @@ function which(bin: string): boolean {
 	return r.status === 0;
 }
 
-function detectRuntime(prefer?: RuntimeKind): Runtime {
-	const havePref = prefer ? which(prefer === "apple" ? "container" : "docker") : false;
-	const kind: RuntimeKind | undefined = havePref ? prefer : which("container") ? "apple" : which("docker") ? "docker" : undefined;
-	if (!kind) {
-		throw new Error("Neither `container` nor `docker` was found on PATH.");
+async function detectRuntimeWithFallback(prefer?: RuntimeKind, ctx?: any): Promise<Runtime | null> {
+	const haveApple = which("container");
+	const haveDocker = which("docker");
+
+	if (!haveApple && !haveDocker) {
+		return null;
 	}
-	return kind === "apple" ? appleRuntime() : dockerRuntime();
+
+	// Determine order based on preference (Docker is preferred over Apple container)
+	const tryOrder: RuntimeKind[] = prefer === "apple" ? ["apple", "docker"] : ["docker", "apple"];
+
+	for (const kind of tryOrder) {
+		if (kind === "apple" && !haveApple) continue;
+		if (kind === "docker" && !haveDocker) continue;
+
+		const runtime = kind === "apple" ? appleRuntime() : dockerRuntime();
+
+		// Test the runtime with a quick 3s smoke test
+		const testName = `pi-test-${randomSuffix()}`;
+		try {
+			const r = await spawnWithTimeout(runtime.bin, ["run", "-d", "--rm", "--name", testName, "debian:bookworm-slim", "sleep", "infinity"], 3000);
+			if (r.code === 0 && !r.timedOut) {
+				// Clean up test container
+				runtime.stop(testName);
+				if (ctx?.ui) {
+					ctx.ui.notify(`Using ${kind} runtime (3s smoke test passed)`, "info");
+				}
+				return runtime;
+			}
+			if (r.timedOut) {
+				if (ctx?.ui) {
+					ctx.ui.notify(`${kind} runtime timed out (3s), trying fallback...`, "warning");
+				}
+			}
+		} catch {
+			// Fall through to next runtime
+		}
+	}
+
+	return null;
 }
 
 /** Spawn a command with a timeout. Returns {code, stdout, stderr, timedOut} */
@@ -189,9 +224,9 @@ function appleRuntime(): Runtime {
 			// retrying the same name is hopeless — generate a fresh name
 			// instead. We try a few attempts before giving up.
 			for (let attempt = 0; attempt < 5; attempt++) {
-				const r = await spawnWithTimeout(bin, buildArgs(currentName), 30000);
+				const r = await spawnWithTimeout(bin, buildArgs(currentName), 60000);
 				if (r.timedOut) {
-					throw new Error(`apple container run timed out after 30s (command: container run ${currentName})`);
+					throw new Error(`apple container run timed out after 60s (command: container run ${currentName})`);
 				}
 				if (r.code === 0) return currentName;
 				lastErr = (r.stderr || r.stdout || "").trim();
@@ -246,9 +281,9 @@ function dockerRuntime(): Runtime {
 			}
 			if (!allowNetwork) args.push("--network", "none");
 			args.push(image, "sleep", "infinity");
-			const r = await spawnWithTimeout(bin, args, 30000);
+			const r = await spawnWithTimeout(bin, args, 60000);
 			if (r.timedOut) {
-				throw new Error(`docker run timed out after 30s (command: docker run ${name})`);
+				throw new Error(`docker run timed out after 60s (command: docker run ${name})`);
 			}
 			if (r.code !== 0) {
 				throw new Error(`docker run failed: ${r.stderr || r.stdout}`);
@@ -550,7 +585,17 @@ export default function (pi: ExtensionAPI) {
 		type: "string",
 	});
 	pi.registerFlag("container-net", {
-		description: "Allow outbound network from the sandbox",
+		description: "Allow outbound network from the sandbox (default: on; use --no-container-net to disable)",
+		type: "boolean",
+		default: true,
+	});
+	pi.registerFlag("prawl", {
+		description: "Alias for --container-net (enables network for prawl/chromium)",
+		type: "boolean",
+		default: false,
+	});
+	pi.registerFlag("browser", {
+		description: "Alias for --container-net (enables network for prawl/chromium)",
 		type: "boolean",
 		default: false,
 	});
@@ -643,9 +688,13 @@ export default function (pi: ExtensionAPI) {
 		if (!(pi.getFlag("container") as boolean)) return;
 
 		try {
-			const runtime = detectRuntime(pi.getFlag("container-runtime") as RuntimeKind | undefined);
+			const runtime = await detectRuntimeWithFallback(pi.getFlag("container-runtime") as RuntimeKind | undefined, ctx);
+			if (!runtime) {
+				ctx.ui.notify("No working container runtime found (Apple container and Docker both unavailable or timed out). Running without sandbox.", "warning");
+				return;
+			}
 			const image = (pi.getFlag("container-image") as string) || "pi-sandbox:latest";
-			const allowNetwork = pi.getFlag("container-net") as boolean;
+			const allowNetwork = (pi.getFlag("container-net") as boolean) || (pi.getFlag("prawl") as boolean) || (pi.getFlag("browser") as boolean);
 			const keep = pi.getFlag("container-keep") as boolean;
 			const mountSkills = pi.getFlag("container-mount-skills") as boolean;
 			const extraPathsRaw = pi.getFlag("container-mount-paths") as string | undefined;
@@ -712,18 +761,18 @@ export default function (pi: ExtensionAPI) {
 						5000,
 					);
 					if (!probe.toString().includes("blocked")) {
-						ctx.ui.notify(
-							"⚠️  Sandbox network lockdown FAILED — container may have outbound access. "
-								+ "Consider using Docker runtime (--container-runtime docker) for hard network isolation.",
-							"warn",
-						);
+					ctx.ui.notify(
+						"⚠️  Sandbox network lockdown FAILED — container may have outbound access. "
+							+ "Consider using Docker runtime (--container-runtime docker) for hard network isolation.",
+						"warning",
+					);
 					}
 				} catch {
 					// Non-fatal: route deletion may not work in all Apple container configs.
 					ctx.ui.notify(
 						"⚠️  Could not enforce network isolation in Apple container. "
 							+ "Use --container-runtime docker for guaranteed network blocking.",
-						"warn",
+						"warning",
 					);
 				}
 			}

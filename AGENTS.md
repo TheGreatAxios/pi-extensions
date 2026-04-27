@@ -31,11 +31,14 @@ bun run build-image:apple        # force Apple container
 # Run pi with sandboxing enabled (default)
 pi -e ./index.ts
 
+# Run pi with sandboxing enabled (default, network on via proxy)
+pi -e ./index.ts
+
 # Run without sandboxing
 pi -e ./index.ts --no-container  # or --noc
 
-# With network access (for npm install, pip, etc.)
-pi -e ./index.ts --container-net
+# Disable network inside container (proxy won't see traffic either)
+pi -e ./index.ts --no-container-net
 
 # Keep container alive after exit (debugging)
 pi -e ./index.ts --container-keep
@@ -70,7 +73,9 @@ The four adapter functions (`readOps`, `writeOps`, `editOps`, `bashOps`) transla
 - Process-level cleanup hooks on `exit`/`SIGINT`/`SIGTERM` for ungraceful exits
 
 #### Sandbox Image (`docker/Dockerfile`)
-Debian bookworm-slim based. Installs: bash, git, curl, nodejs, npm, python3, ripgrep, jq, make, etc. Runs as non-root user `pi` (uid/gid 1000) so bind-mounted files have predictable ownership.
+Debian bookworm-slim based. Installs: bash, git, curl, nodejs, npm, python3, ripgrep, jq, make, chromium, bun, prawl, etc. Runs as non-root user `pi` (uid/gid 1000) so bind-mounted files have predictable ownership.
+
+> **⚠️ Rebuild required.** Any change to `pi-sandbox/docker/Dockerfile` (adding packages, changing bun/prawl versions, modifying build steps) requires rebuilding the sandbox image before it takes effect. Always prompt the user to run `cd pi-sandbox && bun run build` after modifying the Dockerfile. Changes to `index.ts` are host-side and take effect immediately.
 
 ---
 
@@ -84,8 +89,8 @@ A [pi coding-agent](https://pi.dev) extension that intercepts every bash command
 # Install dependencies
 cd pi-sandbox-proxy && bun install
 
-# Run with pi-sandbox (proxy auto-detects sandbox)
-pi -e ../pi-sandbox/index.ts -e ./index.ts --container-net
+# Run with pi-sandbox (proxy auto-detects sandbox; network on by default)
+pi -e ../pi-sandbox/index.ts -e ./index.ts
 
 # Run standalone (host-level auditing, no container needed)
 pi -e ./index.ts

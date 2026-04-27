@@ -108,6 +108,37 @@ export default function (pi: ExtensionAPI) {
 
 		if (!parsed.hasNetworkActivity) return;
 
+		// If the sandbox extension is active but networking is disabled,
+		// no amount of proxy approval will help — the container literally
+		// has no network stack (--network none / --no-dns). Short-circuit
+		// with a clear message instead of running the approval gauntlet.
+		//
+		// We detect "sandbox is loaded" by checking whether any of its flags
+		// are registered (they'll be undefined if the sandbox extension isn't
+		// loaded at all).
+		const containerOn = pi.getFlag("container") as boolean | undefined;
+		const noContainer = pi.getFlag("no-container") as boolean | undefined;
+		const noc = pi.getFlag("noc") as boolean | undefined;
+		const containerNet = pi.getFlag("container-net") as boolean | undefined;
+		const sandboxLoaded =
+			containerOn !== undefined ||
+			noContainer !== undefined ||
+			noc !== undefined ||
+			containerNet !== undefined;
+		const inSandboxWithoutNet =
+			sandboxLoaded &&
+			containerOn !== false &&
+			!(noContainer || noc) &&
+			!containerNet;
+		if (inSandboxWithoutNet) {
+			const reason =
+				"Sandbox is running without network access (container has --network none). " +
+				"Restart pi with --container-net to enable outbound connectivity, " +
+				"then the security proxy will prompt you to approve each domain.";
+			auditLog.log({ action: "blocked", subject: parsed.raw, reason: "sandbox-no-network" });
+			return { block: true, reason };
+		}
+
 		if (pendingApprovals >= MAX_PENDING_APPROVALS) {
 			return {
 				block: true,
