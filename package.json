@@ -1,0 +1,17 @@
+{
+	"name": "pi-extensions",
+	"private": true,
+	"version": "0.1.0",
+	"description": "pi coding-agent extensions: container sandbox + security proxy",
+	"keywords": ["pi-package"],
+	"type": "module",
+	"pi": {
+		"extensions": [
+			"./pi-sandbox/index.ts",
+			"./pi-sandbox-proxy/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-coding-agent": "*"
+	}
+}

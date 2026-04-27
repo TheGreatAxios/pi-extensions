@@ -6,9 +6,12 @@
 	"type": "module",
 	"scripts": {
 		"build": "bun run build-image",
-		"build-image": "which container >/dev/null 2>&1 && container build -t pi-sandbox:latest -f docker/Dockerfile docker || docker build -t pi-sandbox:latest -f docker/Dockerfile docker",
-		"build-image:docker": "docker build -t pi-sandbox:latest -f docker/Dockerfile docker",
-		"build-image:apple": "container build -t pi-sandbox:latest -f docker/Dockerfile docker",
+		"build-image": "which container >/dev/null 2>&1 && container build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker || docker build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker",
+		"build-image:docker": "docker build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker",
+		"build-image:apple": "container build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker",
+		"docker:build": "docker build -t thegreataxios/pi-sandbox:$(node -e \"process.stdout.write(require('./package.json').version)\") -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker",
+		"docker:publish": "docker push thegreataxios/pi-sandbox:$(node -e \"process.stdout.write(require('./package.json').version)\") && docker push thegreataxios/pi-sandbox:latest",
+		"docker:release": "bun run docker:build && bun run docker:publish",
 		"clean": "echo 'nothing to clean'",
 		"check": "echo 'nothing to check'"
 	},

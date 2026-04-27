@@ -20,14 +20,14 @@
  *     cannot ask the sandbox to read /etc/passwd on the host.
  *
  * Usage:
- *   1. Build the sandbox image:
- *        docker build -t pi-sandbox:latest -f docker/Dockerfile docker
- *      (or `container build ...` once `container system start` is done)
- *   2. Run pi with the extension (sandbox is ON by default):
+ *   Docker: image is pulled automatically from Docker Hub on first run.
+ *   Apple container: build manually first:
+ *        container build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker
+ *   Then run pi with the extension (sandbox is ON by default):
  *        pi -e ./index.ts
  *      Optional flags:
  *        --container-runtime docker|apple  (default: auto-detect, prefer apple)
- *        --container-image <name>          (default: pi-sandbox:latest)
+ *        --container-image <name>          (default: thegreataxios/pi-sandbox:latest)
  *        --container-net                   (allow outbound network)
  *        --prawl, --browser                 (alias for --container-net)
  *        --container-keep                  (don't stop the container on exit)
@@ -581,7 +581,7 @@ export default function (pi: ExtensionAPI) {
 		type: "string",
 	});
 	pi.registerFlag("container-image", {
-		description: "Image to use for the sandbox (default: pi-sandbox:latest)",
+		description: "Image to use for the sandbox (default: thegreataxios/pi-sandbox:latest)",
 		type: "string",
 	});
 	pi.registerFlag("container-net", {
@@ -693,7 +693,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("No working container runtime found (Apple container and Docker both unavailable or timed out). Running without sandbox.", "warning");
 				return;
 			}
-			const image = (pi.getFlag("container-image") as string) || "pi-sandbox:latest";
+			const image = (pi.getFlag("container-image") as string) || "thegreataxios/pi-sandbox:latest";
 			const allowNetwork = (pi.getFlag("container-net") as boolean) || (pi.getFlag("prawl") as boolean) || (pi.getFlag("browser") as boolean);
 			const keep = pi.getFlag("container-keep") as boolean;
 			const mountSkills = pi.getFlag("container-mount-skills") as boolean;
@@ -704,13 +704,24 @@ export default function (pi: ExtensionAPI) {
 			const skillMounts = mountSkills ? discoverSkillDirs(extraPaths) : [];
 
 			if (!(await runtime.exists(image))) {
-				ctx.ui.notify(
-					`Sandbox image "${image}" not found. Build it first:\n  ${
-						runtime.kind === "apple" ? "container" : "docker"
-					} build -t ${image} -f docker/Dockerfile docker`,
-					"error",
-				);
-				return;
+				// Try pulling from registry (Docker only; Apple container has no pull command)
+				let pulled = false;
+				if (runtime.kind === "docker") {
+					ctx.ui.notify(`Sandbox image "${image}" not found locally, pulling from registry...`);
+					const pull = await spawnWithTimeout(runtime.bin, ["pull", image], 120000);
+					pulled = pull.code === 0 && !pull.timedOut;
+				}
+				if (!pulled && !(await runtime.exists(image))) {
+					ctx.ui.notify(
+						`Sandbox image "${image}" not found.${
+							runtime.kind === "docker"
+								? " Pull failed. Build it manually:\n  docker build -t " + image + " -f docker/Dockerfile docker"
+								: " Apple container does not support pulling. Build it first:\n  container build -t " + image + " -f docker/Dockerfile docker"
+						} `,
+						"error",
+					);
+					return;
+				}
 			}
 
 			const requestedName = `pi-sbx-${randomSuffix()}`;
