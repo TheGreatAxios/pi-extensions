@@ -8,7 +8,7 @@ export interface ApprovalResult {
 	approved?: boolean;
 	mutatedCommand?: string;
 	reason?: string;
-	approvalSource?: "cache" | "user-7d" | "user-30d" | "auto";
+	approvalSource?: "cache" | "user-7d" | "user-30d" | "user-once" | "auto";
 }
 
 export async function requestApproval(
@@ -69,12 +69,20 @@ export async function requestApproval(
 		[
 			`Approve for 30 days`,
 			`Approve for 7 days`,
-			`Block`,
+			`Use once`,
+			`Deny`,
 		],
 	);
 
-	if (!choice || choice.includes("Block")) {
+	if (!choice || choice.includes("Deny")) {
 		return { blocked: true, reason: "User denied approval" };
+	}
+
+	if (choice.includes("once")) {
+		return {
+			approved: true,
+			approvalSource: "user-once",
+		};
 	}
 
 	const days = choice.includes("30") ? 30 : 7;
