@@ -1,7 +1,7 @@
 {
 	"name": "pi-container-sandbox",
 	"private": true,
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "pi coding-agent extension that runs every read/write/edit/bash op inside a per-session Linux container (Apple `container` or Docker).",
 	"type": "module",
 	"scripts": {
@@ -9,8 +9,8 @@
 		"build-image": "which container >/dev/null 2>&1 && container build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker || docker build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker",
 		"build-image:docker": "docker build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker",
 		"build-image:apple": "container build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker",
-		"docker:build": "docker build -t thegreataxios/pi-sandbox:$(node -e \"process.stdout.write(require('./package.json').version)\") -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker",
-		"docker:publish": "docker push thegreataxios/pi-sandbox:$(node -e \"process.stdout.write(require('./package.json').version)\") && docker push thegreataxios/pi-sandbox:latest",
+		"docker:build": "docker build -t thegreataxios/pi-sandbox:$(bun -e \"process.stdout.write(require('./package.json').version)\") -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker",
+		"docker:publish": "docker push thegreataxios/pi-sandbox:$(bun -e \"process.stdout.write(require('./package.json').version)\") && docker push thegreataxios/pi-sandbox:latest",
 		"docker:release": "bun run docker:build && bun run docker:publish",
 		"clean": "echo 'nothing to clean'",
 		"check": "echo 'nothing to check'"
@@ -21,10 +21,10 @@
 		]
 	},
 	"dependencies": {
-		"@mariozechner/pi-coding-agent": "^0.70.2"
+		"@mariozechner/pi-coding-agent": "^0.70.5"
 	},
 	"devDependencies": {
 		"@types/node": "^25.6.0",
-		"typescript": "5.6"
+		"typescript": "~6.0.3"
 	}
 }
