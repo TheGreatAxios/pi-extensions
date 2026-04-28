@@ -1,9 +1,11 @@
 {
 	"name": "pi-extensions",
 	"private": true,
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "pi coding-agent extensions: container sandbox + security proxy",
-	"keywords": ["pi-package"],
+	"keywords": [
+		"pi-package"
+	],
 	"type": "module",
 	"pi": {
 		"extensions": [
