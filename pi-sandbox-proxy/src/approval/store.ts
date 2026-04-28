@@ -1,9 +1,12 @@
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+export type ApprovalScope = "exact" | "domain";
+
 export interface ApprovalRecord {
 	subject: string;
 	specifier: string;
+	scope: ApprovalScope;
 	approvedAt: number;
 	expiresAt: number;
 	approvedBy: string;
@@ -33,6 +36,8 @@ export class ApprovalStore {
 			const now = Date.now();
 			for (const record of raw) {
 				if (record.expiresAt > now) {
+					// Backfill scope for records from before the field existed
+					if (!record.scope) record.scope = "exact";
 					this.records.set(record.subject + ":" + record.specifier, record);
 				}
 			}
@@ -56,10 +61,31 @@ export class ApprovalStore {
 		for (const [, record] of this.records) {
 			if (record.subject === subject && record.expiresAt > Date.now()) return record;
 		}
+
+		// Domain wildcard lookup: if subject is a URL, check for a domain-scoped approval
+		const domain = this.extractDomain(subject);
+		if (domain) {
+			const domainKey = `${domain}:*`;
+			const wildcard = this.records.get(domainKey);
+			if (wildcard && wildcard.scope === "domain" && wildcard.expiresAt > Date.now()) {
+				return wildcard;
+			}
+		}
+
 		return undefined;
 	}
 
-	add(subject: string, specifier: string, days: number, reason: string): void {
+	/** Extract the domain (host) from a URL string, or return undefined */
+	private extractDomain(subject: string): string | undefined {
+		try {
+			const url = new URL(subject.startsWith("http") ? subject : `https://${subject}`);
+			return url.hostname;
+		} catch {
+			return undefined;
+		}
+	}
+
+	add(subject: string, specifier: string, days: number, reason: string, scope: ApprovalScope = "exact"): void {
 		const maxDays = 30; // hard cap
 		const actualDays = Math.min(days, maxDays);
 		const now = Date.now();
@@ -67,6 +93,7 @@ export class ApprovalStore {
 		const record: ApprovalRecord = {
 			subject,
 			specifier,
+			scope,
 			approvedAt: now,
 			expiresAt: now + actualDays * 24 * 60 * 60 * 1000,
 			approvedBy: "user",
@@ -87,6 +114,14 @@ export class ApprovalStore {
 		}
 		if (found) this.save();
 		return found;
+	}
+
+	/** Get just the domains that have wildcard approvals (for proxy whitelist) */
+	listWildcardDomains(): string[] {
+		const now = Date.now();
+		return Array.from(this.records.values())
+			.filter((r) => r.scope === "domain" && r.expiresAt > now)
+			.map((r) => r.subject);
 	}
 
 	list(): ApprovalRecord[] {

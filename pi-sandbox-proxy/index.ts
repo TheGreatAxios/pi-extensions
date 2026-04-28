@@ -34,6 +34,7 @@ import { ApprovalStore } from "./src/approval/store";
 import { SecurityPipeline } from "./src/security/pipeline";
 import { detectPromptInjection } from "./src/detection/prompt-injection";
 import { AuditLog } from "./src/util/log";
+import { DomainWhitelist } from "./src/proxy/whitelist";
 
 const SECURITY_APPENDIX = `
 
@@ -59,6 +60,12 @@ export default function (pi: ExtensionAPI) {
 	const store = new ApprovalStore(agentDir);
 	const auditLog = new AuditLog(agentDir);
 	const pipeline = new SecurityPipeline(config, store, auditLog);
+	const domainWhitelist = new DomainWhitelist(config.defaultDomains);
+
+	// Seed whitelist from any existing wildcard approvals
+	for (const domain of store.listWildcardDomains()) {
+		domainWhitelist.add(domain);
+	}
 
 	let pendingApprovals = 0;
 	const MAX_PENDING_APPROVALS = 20;
@@ -165,12 +172,21 @@ export default function (pi: ExtensionAPI) {
 
 		if (result.approved) {
 			pendingApprovals++;
+
+			// If domain wildcard was approved, add to proxy whitelist
+			if (result.approvedDomains) {
+				for (const domain of result.approvedDomains) {
+					domainWhitelist.add(domain);
+				}
+			}
+
 			auditLog.log({
 				action: "approved",
 				subject: parsed.kind === "package-install"
 					? parsed.packages.map((p: { name: string; version: string | null }) => `${p.name}@${p.version}`).join(", ")
 					: parsed.urls.join(", "),
 				source: result.approvalSource,
+				scope: result.scope,
 			});
 		}
 	});
@@ -210,11 +226,12 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Slash commands ---
 
-	pi.registerCommand("proxy", {
+		pi.registerCommand("proxy", {
 		description: "Show security proxy status (approvals, blocked count, config)",
 		handler: async (_args, ctx) => {
 			const approvals = store.list();
 			const active = approvals.filter((a: { expiresAt: number }) => a.expiresAt > Date.now());
+			const wildcards = store.listWildcardDomains();
 			ctx.ui.notify(
 				[
 					"Proxy Status:",
@@ -222,8 +239,14 @@ export default function (pi: ExtensionAPI) {
 					`  Active approvals: ${active.length}`,
 					`  Max duration: ${config.maxApprovalDays} days`,
 					`  Deep scan: ${config.deepScan ? "on" : "off"}`,
+					wildcards.length > 0
+						? `\n  Wildcard domains:\n${wildcards.map((d: string) => `    - ${d}/*`).join("\n")}`
+						: "",
 					active.length > 0
-						? `\n  Approved:\n${active.map((a: { subject: string; expiresAt: number }) => `    - ${a.subject} (expires ${new Date(a.expiresAt).toISOString()})`).join("\n")}`
+						? `\n  Approved:\n${active.map((a: { subject: string; specifier: string; scope: string; expiresAt: number }) => {
+							const scopeTag = a.scope === "domain" ? " [domain]" : "";
+							return `    - ${a.subject}${a.specifier !== a.subject ? ":" + a.specifier : ""}${scopeTag} (expires ${new Date(a.expiresAt).toISOString()})`;
+						}).join("\n")}`
 						: "",
 				].join("\n"),
 				"info",
@@ -232,20 +255,37 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("proxy-approve", {
-		description: "Pre-approve a package or domain for N days (usage: /proxy-approve <pkg@ver|domain> [days])",
+		description: "Pre-approve a package or domain for N days (usage: /proxy-approve <pkg@ver|domain> [days] [--wildcard])",
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/);
 			const subject = parts[0];
 			if (!subject) {
-				ctx.ui.notify("Usage: /proxy-approve <package@version|domain> [days]", "warning");
+				ctx.ui.notify("Usage: /proxy-approve <package@version|domain> [days] [--wildcard]", "warning");
 				return;
 			}
+			const isWildcard = parts.includes("--wildcard") || parts.includes("-w");
+			const dayArg = parts.find((p: string) => /^\d+$/.test(p));
 			const days = Math.min(
-				parseInt(parts[1] || String(config.maxApprovalDays), 10),
+				parseInt(dayArg || String(config.maxApprovalDays), 10),
 				config.maxApprovalDays,
 			);
-			store.add(subject, subject, days, "manual pre-approval");
-			ctx.ui.notify(`Approved "${subject}" for ${days} days`, "info");
+
+			if (isWildcard) {
+				// Extract domain from URL if needed
+				let domain = subject;
+				try {
+					const url = new URL(subject.startsWith("http") ? subject : `https://${subject}`);
+					domain = url.hostname;
+				} catch {
+					// assume it's already a bare domain
+				}
+				store.add(domain, "*", days, "manual wildcard pre-approval", "domain");
+				domainWhitelist.add(domain);
+				ctx.ui.notify(`Approved domain wildcard "${domain}/*" for ${days} days`, "info");
+			} else {
+				store.add(subject, subject, days, "manual pre-approval", "exact");
+				ctx.ui.notify(`Approved "${subject}" for ${days} days`, "info");
+			}
 		},
 	});
 

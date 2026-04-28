@@ -11,12 +11,16 @@ import type { ApprovalStore } from "../approval/store";
 import type { ProxyConfig } from "../config/types";
 import type { AuditLog } from "../util/log";
 
+import type { ApprovalScope } from "../approval/store";
+
 export interface PipelineResult {
 	blocked: boolean;
 	reason?: string;
 	mutatedCommand?: string;
 	approved?: boolean;
 	approvalSource?: string;
+	approvedDomains?: string[];
+	scope?: ApprovalScope;
 }
 
 export class SecurityPipeline {
@@ -115,6 +119,8 @@ export class SecurityPipeline {
 			mutatedCommand: mutatedCommand ?? approvalResult.mutatedCommand,
 			approved: true,
 			approvalSource: approvalResult.approvalSource,
+			approvedDomains: approvalResult.approvedDomains,
+			scope: approvalResult.scope,
 		};
 	}
 

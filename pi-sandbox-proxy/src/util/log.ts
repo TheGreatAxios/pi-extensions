@@ -8,6 +8,7 @@ interface AuditEntry {
 	reason?: string;
 	mutatedTo?: string;
 	source?: string;
+	scope?: string;
 	matches?: string[];
 }
 

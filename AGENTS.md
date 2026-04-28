@@ -101,8 +101,13 @@ pi -e ./index.ts --proxy-strict
 # Pre-approve a package for 7 days (inside pi)
 /proxy-approve lodash@4.17.21 7
 
+# Pre-approve an entire domain as wildcard for 7 days
+/proxy-approve workflow-sdk.dev 7 --wildcard
+/proxy-approve https://workflow-sdk.dev 7 -w
+
 # Revoke an approval
 /proxy-revoke lodash@4.17.21
+/proxy-revoke workflow-sdk.dev
 
 # Show recent security events
 /proxy-audit
@@ -157,8 +162,12 @@ Six parsers extract structured data from raw bash commands:
 All parsers handle quoted arguments, `&&`/`;`/`|` chaining, subshells, heredocs, and multi-line commands.
 
 ### Approval System (`src/approval/`)
-- **store.ts** — JSON file at `~/.pi/agent/proxy-approvals.json`. Atomic writes (`.tmp` + rename). Max 30 days, no "forever" option.
-- **flow.ts** — Interactive dialogs showing package name, version, vulnerability count, typosquat warnings. Options: Approve 7d / Approve 30d / Block.
+- **store.ts** — JSON file at `~/.pi/agent/proxy-approvals.json`. Atomic writes (`.tmp` + rename). Max 30 days, no "forever" option. Each record has a `scope` field: `"exact"` (specific URL/package) or `"domain"` (wildcard `domain/*` matching all paths).
+- **flow.ts** — Interactive dialogs showing package name, version, vulnerability count, typosquat warnings. For URL-based requests (curl, wget, git clone, generic), offers two scope tiers:
+  - **Exact URL**: approves only the specific URL requested
+  - **Domain wildcard** (`domain/*`): approves any path on the domain
+  - Both tiers offer 7-day and 30-day options
+  - For package installs, shows standard Approve 7d / Approve 30d / Use once / Deny
 
 ### Vulnerability Scanner (`src/security/scanner.ts`)
 - Always queries [OSV.dev API](https://api.osv.dev/v1/query) at scan time
@@ -182,7 +191,7 @@ On detection: logs to audit log, notifies user via `ctx.ui.notify()`.
 | Command | What it does |
 |---|---|
 | `/proxy` | Show active approvals, config state, blocked count |
-| `/proxy-approve <subject> [days]` | Pre-approve a package or domain |
+| `/proxy-approve <subject> [days] [--wildcard]` | Pre-approve a package, exact URL, or domain wildcard (use `-w` or `--wildcard` for domain) |
 | `/proxy-revoke <subject>` | Revoke an existing approval |
 | `/proxy-audit` | Show last 20 security events from JSONL log |
 
