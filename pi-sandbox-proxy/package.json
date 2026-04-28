@@ -1,7 +1,7 @@
 {
   "name": "pi-sandbox-proxy",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "pi coding-agent extension that intercepts network operations with approval flows, vulnerability scanning, and supply chain security enforcement.",
   "type": "module",
   "scripts": {
