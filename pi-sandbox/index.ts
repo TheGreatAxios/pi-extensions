@@ -18,6 +18,9 @@
  * Path safety:
  *   - Any tool path resolved outside of cwd is rejected. The agent literally
  *     cannot ask the sandbox to read /etc/passwd on the host.
+ *     EXCEPTION: pi clipboard temp files (basename "pi-clipboard-*") are read
+ *     directly from the host. Additional paths can be allowed via
+ *     --container-allow-paths or /sandbox-allow.
  *
  * Usage:
  *   Docker: image is pulled automatically from Docker Hub on first run.
@@ -38,7 +41,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import {
@@ -304,6 +307,8 @@ interface Sandbox {
 	keep: boolean;
 	/** Mounts applied when the container was created. */
 	mounts: MountSpec[];
+	/** Host path prefixes allowed for read access from outside cwd. */
+	allowedExternalPrefixes: string[];
 }
 
 let sandbox: Sandbox | null = null;
@@ -359,6 +364,31 @@ function isReadOnlyMount(containerPath: string, mounts: MountSpec[]): boolean {
 		}
 	}
 	return false;
+}
+
+/**
+ * Check whether an external host path is allowed for read access.
+ * Default: pi clipboard temp files (basename starts with "pi-clipboard-").
+ * Additional prefixes can be added via --container-allow-paths or /sandbox-allow.
+ */
+function isAllowedExternalResource(hostPath: string, allowedPrefixes: string[]): boolean {
+	const abs = resolvePath(hostPath);
+	// Default: pi clipboard files
+	const basename = abs.split("/").pop() || "";
+	if (basename.startsWith("pi-clipboard-")) return true;
+	// User-configured prefixes
+	for (const prefix of allowedPrefixes) {
+		if (abs === prefix || abs.startsWith(`${prefix}/`)) return true;
+	}
+	return false;
+}
+
+/**
+ * Check if a host path falls inside the project cwd.
+ */
+function isInsideCwd(hostPath: string, hostCwd: string): boolean {
+	const abs = resolvePath(hostCwd, hostPath);
+	return abs === hostCwd || abs.startsWith(`${hostCwd}/`);
 }
 
 function shq(s: string): string {
@@ -444,10 +474,39 @@ function execStream(
 // ---------------------------------------------------------------------------
 
 function readOps(sbx: Sandbox): ReadOperations {
+	const resolveAbs = (p: string) => resolvePath(sbx.hostCwd, p);
+	const tryExternal = (p: string): { external: true; abs: string } | { external: false } => {
+		if (isInsideCwd(p, sbx.hostCwd)) return { external: false };
+		const abs = resolveAbs(p);
+		return isAllowedExternalResource(abs, sbx.allowedExternalPrefixes)
+			? { external: true, abs }
+			: { external: false };
+	};
+
 	return {
-		readFile: (p) => execCapture(sbx, `cat ${shq(toRemote(p, sbx.hostCwd, sbx.mounts))}`),
-		access: (p) => execCapture(sbx, `test -r ${shq(toRemote(p, sbx.hostCwd, sbx.mounts))}`).then(() => {}),
+		readFile: (p) => {
+			const ext = tryExternal(p);
+			if (ext.external) return Promise.resolve(readFileSync(ext.abs));
+			return execCapture(sbx, `cat ${shq(toRemote(p, sbx.hostCwd, sbx.mounts))}`);
+		},
+		access: (p) => {
+			const ext = tryExternal(p);
+			if (ext.external) {
+				try { statSync(ext.abs); return Promise.resolve(); }
+				catch (e) { return Promise.reject(e); }
+			}
+			return execCapture(sbx, `test -r ${shq(toRemote(p, sbx.hostCwd, sbx.mounts))}`).then(() => {});
+		},
 		detectImageMimeType: async (p) => {
+			const ext = tryExternal(p);
+			if (ext.external) {
+				const ext2lower = ext.abs.split(".").pop()?.toLowerCase() || "";
+				const map: Record<string, string> = {
+					jpg: "image/jpeg", jpeg: "image/jpeg",
+					png: "image/png", gif: "image/gif", webp: "image/webp",
+				};
+				return map[ext2lower] || null;
+			}
 			try {
 				const r = await execCapture(sbx, `file --mime-type -b ${shq(toRemote(p, sbx.hostCwd, sbx.mounts))}`);
 				const m = r.toString().trim();
@@ -613,6 +672,10 @@ export default function (pi: ExtensionAPI) {
 		description: "Comma-separated list of additional host directories to mount read-only at /skills/<basename>",
 		type: "string",
 	});
+	pi.registerFlag("container-allow-paths", {
+		description: "Comma-separated list of host path prefixes to allow for read access from outside the sandbox (e.g. ~/Downloads)",
+		type: "string",
+	});
 
 	const localCwd = process.cwd();
 	const localRead = createReadTool(localCwd);
@@ -724,9 +787,16 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
+			const allowPathsRaw = pi.getFlag("container-allow-paths") as string | undefined;
+			const allowedExternalPrefixes = allowPathsRaw
+				? allowPathsRaw.split(",").map((p) => p.trim()).filter(Boolean).map((p) =>
+					p.startsWith("~") ? resolvePath(homedir(), p.slice(1)) : resolvePath(p)
+				)
+				: [];
+
 			const requestedName = `pi-sbx-${randomSuffix()}`;
 			const actualName = await runtime.run({ name: requestedName, image, hostCwd: localCwd, allowNetwork, extraMounts: skillMounts.length ? skillMounts : undefined });
-			sandbox = { runtime, name: actualName, hostCwd: localCwd, keep, mounts: skillMounts };
+			sandbox = { runtime, name: actualName, hostCwd: localCwd, keep, mounts: skillMounts, allowedExternalPrefixes };
 
 			// Belt-and-braces cleanup for ungraceful exits (Apple `container`
 			// has no equivalent of docker --rm on host-side kill). Docker's
@@ -819,6 +889,33 @@ export default function (pi: ExtensionAPI) {
 				`Sandbox: ${sbx.runtime.kind} container ${sbx.name}\nhost cwd: ${sbx.hostCwd}\n${info}`,
 				"info",
 			);
+		},
+	});
+
+	pi.registerCommand("sandbox-allow", {
+		description: "Allow the sandbox to read files from a host path (added for this session)",
+		handler: async (args, ctx) => {
+			const sbx = getSbx();
+			if (!sbx) {
+				ctx.ui.notify("Sandbox is not active.", "info");
+				return;
+			}
+			const raw = args.trim();
+			if (!raw) {
+				ctx.ui.notify("Usage: /sandbox-allow <host-path>\nAdds a host path prefix for read access from the sandbox.", "info");
+				return;
+			}
+			const abs = raw.startsWith("~") ? resolvePath(homedir(), raw.slice(1)) : resolvePath(raw);
+			if (sbx.allowedExternalPrefixes.includes(abs)) {
+				ctx.ui.notify(`Path ${abs} is already allowed.`, "info");
+				return;
+			}
+			if (!existsSync(abs)) {
+				ctx.ui.notify(`Path ${abs} does not exist on host.`, "warning");
+				return;
+			}
+			sbx.allowedExternalPrefixes.push(abs);
+			ctx.ui.notify(`Sandbox: read access now allowed for ${abs}`, "info");
 		},
 	});
 }
