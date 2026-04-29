@@ -1,23 +1,42 @@
 {
-  "name": "pi-sandbox-proxy",
-  "private": true,
-  "version": "0.1.2",
-  "description": "pi coding-agent extension that intercepts network operations with approval flows, vulnerability scanning, and supply chain security enforcement.",
-  "type": "module",
-  "scripts": {
-    "check": "echo 'nothing to check'",
-    "clean": "echo 'nothing to clean'"
-  },
-  "pi": {
-    "extensions": [
-      "./index.ts"
-    ]
-  },
-  "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.70.5"
-  },
-  "devDependencies": {
-    "@types/node": "^25.6.0",
-    "typescript": "~6.0.3"
-  }
+	"name": "pi-sandbox-proxy",
+	"version": "0.1.2",
+	"description": "pi coding-agent extension that intercepts network operations with approval flows, vulnerability scanning, and supply chain security enforcement.",
+	"license": "MIT",
+	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/thegreataxios/pi-extensions.git",
+		"directory": "pi-sandbox-proxy"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"proxy",
+		"security",
+		"vulnerability-scanning",
+		"supply-chain"
+	],
+	"type": "module",
+	"files": [
+		"index.ts",
+		"src/"
+	],
+	"scripts": {
+		"check": "echo 'nothing to check'",
+		"clean": "echo 'nothing to clean'",
+		"prepublishOnly": "bun run check"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"dependencies": {
+		"@mariozechner/pi-coding-agent": "^0.70.5"
+	},
+	"devDependencies": {
+		"@types/node": "^25.6.0",
+		"typescript": "~6.0.3"
+	}
 }

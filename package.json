@@ -3,10 +3,21 @@
 	"private": true,
 	"version": "0.1.1",
 	"description": "pi coding-agent extensions: container sandbox + security proxy",
+	"license": "MIT",
+	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/thegreataxios/pi-extensions.git"
+	},
 	"keywords": [
 		"pi-package"
 	],
 	"type": "module",
+	"scripts": {
+		"publish:sandbox": "cd pi-sandbox && npm publish --access public",
+		"publish:proxy": "cd pi-sandbox-proxy && npm publish --access public",
+		"publish": "bun run publish:sandbox && bun run publish:proxy"
+	},
 	"pi": {
 		"extensions": [
 			"./pi-sandbox/index.ts",

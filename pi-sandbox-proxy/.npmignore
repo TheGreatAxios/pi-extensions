@@ -1,0 +1,5 @@
+# dev only
+*.tsbuildinfo
+tsconfig.json
+bun.lock
+node_modules/
