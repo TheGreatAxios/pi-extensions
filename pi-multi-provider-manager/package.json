@@ -1,6 +1,6 @@
 {
 	"name": "pi-multi-provider-manager",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Multi-account ChatGPT/Codex OAuth plus Fireworks and Z.ai API-key providers for pi.",
 	"license": "MIT",
 	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
