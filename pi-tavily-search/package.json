@@ -1,0 +1,40 @@
+{
+	"name": "@thegreataxios/pi-tavily-search",
+	"version": "1.0.0",
+	"description": "AI-powered web search using Tavily API for pi coding-agent",
+	"license": "MIT",
+	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/thegreataxios/pi-extensions.git",
+		"directory": "pi-tavily-search"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"search",
+		"tavily",
+		"web-search",
+		"ai-search"
+	],
+	"type": "module",
+	"main": "index.ts",
+	"files": [
+		"index.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"check": "tsc --noEmit",
+		"clean": "echo 'nothing to clean'",
+		"prepublishOnly": "bun run check"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"dependencies": {
+		"@mariozechner/pi-coding-agent": "^0.70.6"
+	}
+}

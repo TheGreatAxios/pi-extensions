@@ -1,0 +1,40 @@
+{
+	"name": "@thegreataxios/pi-multi-provider-manager",
+	"version": "0.2.0",
+	"description": "Multi-account ChatGPT/Codex OAuth plus Fireworks and Z.ai API-key providers for pi.",
+	"license": "MIT",
+	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/thegreataxios/pi-extensions.git",
+		"directory": "pi-multi-provider-manager"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"chatgpt",
+		"fireworks",
+		"zai",
+		"multi-account",
+		"oauth"
+	],
+	"type": "module",
+	"files": [
+		"index.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"check": "tsc --noEmit",
+		"clean": "echo 'nothing to clean'",
+		"prepublishOnly": "bun run check"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"dependencies": {
+		"@mariozechner/pi-coding-agent": "^0.70.6"
+	}
+}

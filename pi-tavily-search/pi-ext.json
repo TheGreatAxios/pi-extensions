@@ -1,0 +1,40 @@
+{
+  "name": "tavily-search",
+  "version": "1.0.0",
+  "description": "AI-powered web search using Tavily API - automatically invoked when current information or web sources are needed",
+  "entry": "index.ts",
+  "tools": [
+    {
+      "name": "tavily_search",
+      "description": "Search the web using Tavily's AI-optimized search engine. Use this tool when: (1) the user asks about current events, news, or recent information, (2) you need to verify facts or find authoritative sources, (3) the user asks about specific websites, products, or technologies you're uncertain about, (4) real-time data like prices, weather, or status is needed, (5) you need to research a topic beyond your training cutoff.",
+      "autoInvoke": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query string - be specific and include key terms for better results"
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Number of results to return (max 20, default 5)"
+          },
+          "include_answer": {
+            "type": "boolean",
+            "description": "Include AI-synthesized answer summarizing the search results"
+          },
+          "search_depth": {
+            "type": "string",
+            "enum": ["basic", "advanced"],
+            "description": "basic is faster and cheaper, advanced is more thorough for complex queries"
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  ],
+  "activationEvents": [
+    "onSearch",
+    "onWebQuery"
+  ]
+}
