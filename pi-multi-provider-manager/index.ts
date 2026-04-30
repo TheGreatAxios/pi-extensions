@@ -65,22 +65,11 @@ function getAccountsByKind(kind: AccountKind): StoredAccount[] {
 	return loadAccounts().filter((a) => accountKind(a) === kind);
 }
 
+// Models from SDK (dynamically loaded to stay in sync)
 // ---------------------------------------------------------------------------
-// Models
-// ---------------------------------------------------------------------------
 
-
-
-const FIREWORKS_MODELS = [
-	{ id: "accounts/fireworks/routers/kimi-k2p5-turbo", name: "Kimi K2.5 Turbo", input: ["text"], contextWindow: 128000, maxTokens: 16384, reasoning: false },
-];
-
-const ZAI_MODELS = [
-	{ id: "glm-5", name: "GLM-5", input: ["text"], contextWindow: 128000, maxTokens: 16384, reasoning: true },
-	{ id: "glm-5.1", name: "GLM-5.1", input: ["text"], contextWindow: 128000, maxTokens: 16384, reasoning: true },
-	{ id: "glm-5v-turbo", name: "GLM-5V Turbo", input: ["text", "image"], contextWindow: 128000, maxTokens: 16384, reasoning: false },
-	{ id: "glm-5-turbo", name: "GLM-5 Turbo", input: ["text"], contextWindow: 128000, maxTokens: 16384, reasoning: false },
-];
+const FIREWORKS_MODELS = getModels("fireworks");
+const ZAI_MODELS = getModels("zai");
 
 // ---------------------------------------------------------------------------
 // Multi-Account OAuth Flows
@@ -482,12 +471,13 @@ export default function accountsExtension(pi: ExtensionAPI) {
 		else if (kindChoice.startsWith("Fireworks")) kind = "fireworks";
 		else kind = "zai";
 
-		const promptLabel = kind === "codex" || kind === "chatgpt" ? "Codex account label" : `${displayKind(kind)} account label`;
+		const kindPrompt = kind as AccountKind;
+		const promptLabel = kindPrompt === "codex" || kindPrompt === "chatgpt" ? "Codex account label" : `${displayKind(kindPrompt)} account label`;
 		const label = (await ctx.ui.input(promptLabel, ""))?.trim();
 		if (!label) { ctx.ui.notify("Cancelled.", "warning"); return; }
 
 		let apiKeyEnv: string | undefined;
-		if (kind !== "codex" && kind !== "chatgpt") {
+		if (kindPrompt !== "codex" && kindPrompt !== "chatgpt") {
 			const useEnv = await ctx.ui.select("API key source", [
 				"Use environment variable",
 				"I'll enter the key when logging in",
@@ -507,17 +497,18 @@ export default function accountsExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		const account: StoredAccount = { kind, label, ...(apiKeyEnv ? { apiKeyEnv } : {}) };
+		const account: StoredAccount = { kind, label: label!, ...(apiKeyEnv ? { apiKeyEnv } : {}) };
 		accounts.push(account);
 		saveAccounts(accounts);
 		refreshAccountProviders(pi);
 
-		if (kind === "codex" || kind === "chatgpt") {
-			ctx.ui.notify(`✅ Added "${label}". Run /login and select "${label}" to authenticate.`, "success");
+		const kindForNotify = kind as AccountKind;
+		if (kindForNotify === "codex" || kindForNotify === "chatgpt") {
+			ctx.ui.notify(`✅ Added "${label}". Run /login and select "${label}" to authenticate.`, "info");
 		} else if (apiKeyEnv) {
-			ctx.ui.notify(`✅ Added ${displayKind(kind)} "${label}" using $${apiKeyEnv}. Export that variable, then run /login and select "${label}".`, "success");
+			ctx.ui.notify(`✅ Added ${displayKind(kindForNotify)} "${label}" using $${apiKeyEnv}. Export that variable, then run /login and select "${label}".`, "info");
 		} else {
-			ctx.ui.notify(`✅ Added ${displayKind(kind)} "${label}". Run /login and select "${label}" to enter its API key.`, "success");
+			ctx.ui.notify(`✅ Added ${displayKind(kindForNotify)} "${label}". Run /login and select "${label}" to enter its API key.`, "info");
 		}
 	}
 
@@ -539,7 +530,7 @@ export default function accountsExtension(pi: ExtensionAPI) {
 		const newAccounts = accounts.filter((_, i) => i !== index);
 		saveAccounts(newAccounts);
 		refreshAccountProviders(pi);
-		ctx.ui.notify(`✅ Removed ${displayKind(accountKind(account))} "${account.label}".`, "success");
+		ctx.ui.notify(`✅ Removed ${displayKind(accountKind(account))} "${account.label}".`, "info");
 	}
 
 	async function handleReloginInteractive(ctx: ExtensionCommandContext): Promise<void> {
@@ -562,13 +553,13 @@ export default function accountsExtension(pi: ExtensionAPI) {
 		const { AuthStorage } = require("@mariozechner/pi-coding-agent");
 		const authStorage = AuthStorage.create();
 		authStorage.remove(getProviderId(account));
-		ctx.ui.notify(`✅ Cleared credentials for "${account.label}". Run /login and select "${account.label}" to re-authenticate.`, "success");
+		ctx.ui.notify(`✅ Cleared credentials for "${account.label}". Run /login and select "${account.label}" to re-authenticate.`, "info");
 	}
 
 	// Legacy CLI handlers
 	async function handleAdd(parts: string[], ctx: ExtensionCommandContext): Promise<void> {
 		let kind = parseKind(parts[0]);
-		let label = kind ? parts[1] : parts[0];
+		let label: string | undefined = kind ? parts[1] : parts[0];
 		let apiKeyEnv = kind && kind !== "codex" && kind !== "chatgpt" ? parts[2] : undefined;
 
 		if (!kind) kind = "codex";
@@ -578,19 +569,19 @@ export default function accountsExtension(pi: ExtensionAPI) {
 		if (!label) { ctx.ui.notify("Cancelled.", "warning"); return; }
 
 		const accounts = loadAccounts();
-		if (findAccount(accounts, kind, label)) {
-			ctx.ui.notify(`${displayKind(kind)} "${label}" already exists.`, "warning");
+		if (findAccount(accounts, kind, label!)) {
+			ctx.ui.notify(`${displayKind(kind)} "${label!}" already exists.`, "warning");
 			return;
 		}
 
-		const account: StoredAccount = { kind, label, ...(apiKeyEnv ? { apiKeyEnv } : {}) };
+		const account: StoredAccount = { kind, label: label!, ...(apiKeyEnv ? { apiKeyEnv } : {}) };
 		accounts.push(account);
 		saveAccounts(accounts);
 		refreshAccountProviders(pi);
 
-		if (kind === "codex" || kind === "chatgpt") ctx.ui.notify(`Added "${label}". Run /login and select "${label}" to authenticate.`, "info");
-		else if (apiKeyEnv) ctx.ui.notify(`Added ${displayKind(kind)} "${label}" using $${apiKeyEnv}. Export that variable, then run /login and select "${label}".`, "info");
-		else ctx.ui.notify(`Added ${displayKind(kind)} "${label}". Run /login and select "${label}" to enter its API key.`, "info");
+		if (kind === "codex" || kind === "chatgpt") ctx.ui.notify(`Added "${label!}". Run /login and select "${label!}" to authenticate.`, "info");
+		else if (apiKeyEnv) ctx.ui.notify(`Added ${displayKind(kind)} "${label!}" using $${apiKeyEnv}. Export that variable, then run /login and select "${label!}".`, "info");
+		else ctx.ui.notify(`Added ${displayKind(kind)} "${label!}". Run /login and select "${label!}" to enter its API key.`, "info");
 	}
 
 	async function handleRemove(parts: string[], ctx: ExtensionCommandContext): Promise<void> {

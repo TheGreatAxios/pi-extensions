@@ -5,7 +5,7 @@ Multi-account provider extension for [pi](https://pi.dev). Log into multiple Cha
 ## Install
 
 ```bash
-pi install npm:@thegreataxios/pi-multi-provider-manager
+pi install npm:pi-multi-provider-manager
 ```
 
 ## Quick Start

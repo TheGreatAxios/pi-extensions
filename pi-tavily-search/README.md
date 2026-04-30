@@ -5,7 +5,7 @@ AI-powered web search extension for [pi](https://pi.dev). Uses Tavily's search A
 ## Install
 
 ```bash
-pi install npm:@thegreataxios/pi-tavily-search
+pi install npm:pi-tavily-search
 ```
 
 ## Quick Start
