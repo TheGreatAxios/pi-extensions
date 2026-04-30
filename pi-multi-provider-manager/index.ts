@@ -18,7 +18,6 @@ import { getModels } from "@mariozechner/pi-ai";
 
 // Get Codex models from the built-in provider
 const CODEX_MODELS = getModels("openai-codex");
-console.log(`[accounts] Loaded ${CODEX_MODELS.length} Codex models from SDK`);
 
 // ---------------------------------------------------------------------------
 // Config: ~/.pi/agent/accounts.json
@@ -274,7 +273,7 @@ function registerCodexProvider(pi: ExtensionAPI, account: StoredAccount) {
 	const providerId = getProviderId(account);
 	const kind = accountKind(account);
 	const models = CODEX_MODELS.map((m) => ({ ...m, name: `${account.label} · ${m.name}`, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
-	console.log(`[accounts] Registering Codex provider: ${providerId} with ${models.length} models`);
+
 	pi.registerProvider(providerId, {
 		baseUrl: "https://chatgpt.com/backend-api",
 		api: "openai-codex-responses",
@@ -332,14 +331,11 @@ function unregisterAllAccountProviders(pi: ExtensionAPI) {
 }
 
 function refreshAccountProviders(pi: ExtensionAPI) {
-	console.log("[accounts] refreshAccountProviders called");
 	unregisterAllAccountProviders(pi);
 	const accounts = loadAccounts();
-	console.log(`[accounts] Found ${accounts.length} accounts`);
 	for (const account of accounts) {
 		const providerId = getProviderId(account);
 		const kind = accountKind(account);
-		console.log(`[accounts] Processing account: ${account.label} (kind=${kind}, providerId=${providerId})`);
 		registeredProviderIds.push(providerId);
 		// Register only this account's provider
 		if (kind === "codex" || kind === "chatgpt") {
@@ -374,10 +370,7 @@ function refreshAccountProviders(pi: ExtensionAPI) {
 
 export default function accountsExtension(pi: ExtensionAPI) {
 	// Register account providers on startup
-	console.log("[accounts] Extension loading...");
-	console.log("[accounts] Accounts loaded:", loadAccounts().map(a => ({ kind: a.kind, label: a.label })));
 	refreshAccountProviders(pi);
-	console.log("[accounts] Registered provider IDs:", registeredProviderIds);
 
 	// Account management command - fully guided interactive flow
 	pi.registerCommand("accounts", {
