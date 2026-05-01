@@ -459,6 +459,96 @@ class PathApprovalStore {
 }
 
 // ---------------------------------------------------------------------------
+// Per-project sandbox config (.pi/agent/sandbox.json)
+// ---------------------------------------------------------------------------
+
+interface SandboxProjectConfig {
+	image: string;
+	tag: string;
+	pinned: boolean;
+	lastDigest: string | null;
+	lastCheckedAt: number | null;
+}
+
+const DEFAULT_SANDBOX_PROJECT_CONFIG: SandboxProjectConfig = {
+	image: "thegreataxios/pi-sandbox",
+	tag: "latest",
+	pinned: false,
+	lastDigest: null,
+	lastCheckedAt: null,
+};
+
+function getSandboxConfigPath(hostCwd: string): string {
+	return resolvePath(hostCwd, ".pi", "agent", "sandbox.json");
+}
+
+function loadSandboxProjectConfig(hostCwd: string): SandboxProjectConfig {
+	const configPath = getSandboxConfigPath(hostCwd);
+	if (!existsSync(configPath)) {
+		return { ...DEFAULT_SANDBOX_PROJECT_CONFIG };
+	}
+	try {
+		const raw = readFileSync(configPath, "utf-8");
+		const parsed = JSON.parse(raw);
+		return {
+			image: parsed.image ?? DEFAULT_SANDBOX_PROJECT_CONFIG.image,
+			tag: parsed.tag ?? DEFAULT_SANDBOX_PROJECT_CONFIG.tag,
+			pinned: parsed.pinned ?? DEFAULT_SANDBOX_PROJECT_CONFIG.pinned,
+			lastDigest: parsed.lastDigest ?? null,
+			lastCheckedAt: parsed.lastCheckedAt ?? null,
+		};
+	} catch {
+		return { ...DEFAULT_SANDBOX_PROJECT_CONFIG };
+	}
+}
+
+function saveSandboxProjectConfig(hostCwd: string, config: SandboxProjectConfig): void {
+	const configPath = getSandboxConfigPath(hostCwd);
+	const dir = resolvePath(configPath, "..");
+	if (!existsSync(dir)) {
+		mkdirSync(dir, { recursive: true });
+	}
+	const tmpPath = configPath + ".tmp";
+	writeFileSync(tmpPath, JSON.stringify(config, null, 2));
+	renameSync(tmpPath, configPath);
+}
+
+function imageRefForTag(image: string, tag: string): string {
+	return `${image}:${tag}`;
+}
+
+// ---------------------------------------------------------------------------
+// Docker Hub version checker
+// ---------------------------------------------------------------------------
+
+interface TagInfo {
+	name: string;
+	digest: string | null;
+	lastUpdated: string | null;
+}
+
+/**
+ * Fetch tag info from Docker Hub v2 API for a public repository.
+ * Returns null on network error or if the image repo isn't on Docker Hub.
+ */
+async function fetchTagDigest(image: string, tag: string): Promise<TagInfo | null> {
+	try {
+		const url = `https://hub.docker.com/v2/repositories/${image}/tags/${tag}`;
+		const r = await spawnWithTimeout("curl", ["-s", "-f", "-L", url], 10000);
+		if (r.code !== 0 || r.timedOut) return null;
+		const data = JSON.parse(r.stdout);
+		const digest = data?.images?.[0]?.digest ?? null;
+		return {
+			name: tag,
+			digest,
+			lastUpdated: data?.last_updated ?? null,
+		};
+	} catch {
+		return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Interactive approval flow for external paths
 // ---------------------------------------------------------------------------
 
@@ -971,7 +1061,7 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI) {
 			throw new Error(
 				`sandbox: refusing to access ${external}: outside of project cwd ${sbx.hostCwd}. ` +
-				`Use --container-allow-paths or /sandbox-allow to grant access.`,
+				`Use --container-allow-paths or /sandbox allow to grant access.`,
 			);
 		}
 		await ensureExternalReadApproved(external, sbx, pathApprovals!, ctx.ui);
@@ -1052,15 +1142,19 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Load sandbox config from .pi/config.json
+			// Load sandbox config from .pi/config.json and .pi/agent/sandbox.json
 			const config = loadSandboxConfig(localCwd);
+			const projectConfig = loadSandboxProjectConfig(localCwd);
 
 			// Determine size tier (flag > config > default)
 			const sizeFlag = pi.getFlag("container-size") as string | undefined;
 			const sizeTier = parseSizeTier(sizeFlag || config?.size || "sm") || "sm";
 			const tierSpec = TIER_SPECS[sizeTier];
 
-			const image = (pi.getFlag("container-image") as string) || "thegreataxios/pi-sandbox:latest";
+			// Resolve image: flag > .pi/agent/sandbox.json > default
+			const flagImage = pi.getFlag("container-image") as string | undefined;
+			const configImageRef = imageRefForTag(projectConfig.image, projectConfig.tag);
+			const image = flagImage || configImageRef || "thegreataxios/pi-sandbox:latest";
 			const allowNetwork = (pi.getFlag("container-net") as boolean) || (pi.getFlag("prawl") as boolean) || (pi.getFlag("browser") as boolean);
 			const keep = pi.getFlag("container-keep") as boolean;
 			const persist = pi.getFlag("sandbox-persist") as boolean || config?.persist || false;
@@ -1208,6 +1302,46 @@ export default function (pi: ExtensionAPI) {
 				`${statusPrefix}: docker ${actualName}${resStr}${isReusable ? " [re-usable]" : ""}\n${ok}${skillMounts.length ? `\nSkills mounted: ${skillMounts.map((m) => m.target).join(", ")}` : ""}${cacheVolume ? `\nCache volume: ${cacheVolume} at /cache` : ""}`,
 				"info"
 			);
+
+			// ── Background version check ─────────────────────────────────────
+			// Check Docker Hub for a newer image digest (non-blocking, fire & forget).
+			// Only checks if:
+			//   - not using a flag-override image (which takes priority)
+			//   - the tag is not explicitly pinned in sandbox.json
+			//   - at least 24 hours since last check (avoids hammering Docker Hub)
+			if (!flagImage && projectConfig && !projectConfig.pinned) {
+				const now = Date.now();
+				const oneDay = 24 * 60 * 60 * 1000;
+				const lastCheck = projectConfig.lastCheckedAt ?? 0;
+				if (now - lastCheck >= oneDay) {
+					// Fire-and-forget async check — never blocks session start
+					(async () => {
+						try {
+							const tagInfo = await fetchTagDigest(projectConfig.image, projectConfig.tag);
+							if (!tagInfo?.digest) return;
+
+							// Update last-checked timestamp
+							projectConfig.lastCheckedAt = now;
+							if (projectConfig.lastDigest && projectConfig.lastDigest !== tagInfo.digest) {
+								ctx.ui.notify(
+									`📦 New sandbox image available: ${imageRefForTag(projectConfig.image, projectConfig.tag)}\n` +
+									`  Last digest: ${projectConfig.lastDigest.slice(0, 19)}...\n` +
+									`  New digest:  ${tagInfo.digest.slice(0, 19)}...\n` +
+									`  Run \`/sandbox update\` to pull the update.`,
+									"info",
+								);
+							} else if (!projectConfig.lastDigest && tagInfo.digest) {
+								// First check — store the digest for future comparison
+								projectConfig.lastDigest = tagInfo.digest;
+							}
+							projectConfig.lastCheckedAt = Date.now();
+							saveSandboxProjectConfig(localCwd, projectConfig);
+						} catch {
+							// Silently ignore — network may be unavailable
+						}
+					})();
+				}
+			}
 		} catch (e) {
 			sandbox = null;
 			ctx.ui.notify(`Sandbox init failed: ${e instanceof Error ? e.message : String(e)}`, "error");
@@ -1221,97 +1355,248 @@ export default function (pi: ExtensionAPI) {
 		sandbox = null;
 	});
 
+	// ── Shared subcommand handlers ────────────────────────────────────────
+
+	async function cmdSandboxStatus(_subArgs: string, ctx: { ui: ExtensionUIContext }) {
+		const sbx = getSbx();
+		if (!sbx) {
+			ctx.ui.notify("Sandbox is not active. Start pi with --container.", "info");
+			return;
+		}
+		const info = (await execCapture(sbx, "id; uname -a; df -h /workspace | tail -1")).toString();
+		const resParts: string[] = [];
+		if (sbx.resources?.memory) resParts.push(`memory: ${sbx.resources.memory}`);
+		if (sbx.resources?.cpus) resParts.push(`cpus: ${sbx.resources.cpus}`);
+		if (sbx.resources?.disk) resParts.push(`disk: ${sbx.resources.disk}`);
+		if (sbx.resources?.swap !== undefined) resParts.push(`swap: ${sbx.resources.swap}`);
+		if (sbx.resources?.pidsLimit !== undefined) resParts.push(`pids-limit: ${sbx.resources.pidsLimit}`);
+		const resStr = resParts.length ? `\nresources: ${resParts.join(", ")}` : "";
+		const reusableStr = sbx.isReusable ? ` [re-usable${sbx.isReattached ? ", reattached" : ""}]` : "";
+		ctx.ui.notify(
+			`Sandbox: ${sbx.runtime.kind} container ${sbx.name}${reusableStr}\nhost cwd: ${sbx.hostCwd}${resStr}\n${info}`,
+			"info",
+		);
+	}
+
+	async function cmdSandboxAllow(raw: string, ctx: { ui: ExtensionUIContext }) {
+		const sbx = getSbx();
+		if (!sbx) {
+			ctx.ui.notify("Sandbox is not active.", "info");
+			return;
+		}
+		if (!raw) {
+			ctx.ui.notify("Usage: /sandbox allow <host-path>\nAdds a host path prefix for read access from the sandbox.", "info");
+			return;
+		}
+		const abs = raw.startsWith("~") ? resolvePath(homedir(), raw.slice(1)) : resolvePath(raw);
+		if (sbx.allowedExternalPrefixes.includes(abs)) {
+			ctx.ui.notify(`Path ${abs} is already allowed.`, "info");
+			return;
+		}
+		if (!existsSync(abs)) {
+			ctx.ui.notify(`Path ${abs} does not exist on host.`, "warning");
+			return;
+		}
+		sbx.allowedExternalPrefixes.push(abs);
+		ctx.ui.notify(`Sandbox: read access now allowed for ${abs}`, "info");
+	}
+
+	async function cmdSandboxPathsList(ctx: { ui: ExtensionUIContext }) {
+		const store = pathApprovals;
+		if (!store) {
+			ctx.ui.notify("Path approval store not initialized.", "info");
+			return;
+		}
+		const records = store.list();
+		if (records.length === 0) {
+			ctx.ui.notify("No persisted path approvals. External reads will prompt interactively.", "info");
+			return;
+		}
+		const lines = records.map((r) => {
+			const expiry = r.expiresAt === Infinity ? "always" : `expires ${new Date(r.expiresAt).toISOString()}`;
+			return `  ${r.path} (${expiry})`;
+		});
+		ctx.ui.notify(
+			[
+				`Persisted path approvals (${records.length}):`,
+				...lines,
+				"",
+				"Use /sandbox paths revoke <path> to revoke an approval.",
+			].join("\n"),
+			"info",
+		);
+	}
+
+	async function cmdSandboxPathsRevoke(target: string, ctx: { ui: ExtensionUIContext }) {
+		const store = pathApprovals;
+		if (!store) {
+			ctx.ui.notify("Path approval store not initialized.", "info");
+			return;
+		}
+		if (!target) {
+			ctx.ui.notify("Usage: /sandbox paths revoke <path>", "info");
+			return;
+		}
+		const abs = target.startsWith("~") ? resolvePath(homedir(), target.slice(1)) : resolvePath(target);
+		if (store.revoke(abs)) {
+			ctx.ui.notify(`Revoked path approval: ${abs}`, "info");
+		} else {
+			ctx.ui.notify(`No approval found for: ${abs}`, "warning");
+		}
+	}
+
+	async function cmdSandboxUpdate(_subArgs: string, ctx: { ui: ExtensionUIContext }) {
+		const sbx = getSbx();
+		if (!sbx) {
+			ctx.ui.notify("Sandbox is not active.", "info");
+			return;
+		}
+		const hostCwd = sbx.hostCwd;
+		const cfg = loadSandboxProjectConfig(hostCwd);
+		const imageRef = imageRefForTag(cfg.image, cfg.tag);
+
+		ctx.ui.notify(`⬇ Pulling ${imageRef}...`);
+		const pull = await spawnWithTimeout(sbx.runtime.bin, ["pull", imageRef], 120000);
+		if (pull.code !== 0 || pull.timedOut) {
+			ctx.ui.notify(`❌ Failed to pull ${imageRef}.`, "error");
+			return;
+		}
+
+		// Record the new digest
+		const tagInfo = await fetchTagDigest(cfg.image, cfg.tag);
+		if (tagInfo?.digest) {
+			cfg.lastDigest = tagInfo.digest;
+		}
+		cfg.lastCheckedAt = Date.now();
+		saveSandboxProjectConfig(hostCwd, cfg);
+
+		ctx.ui.notify(
+			`✅ Updated sandbox image: ${imageRef}\n` +
+			`   Restart pi (exit and re-run) to use the new image.`,
+			"info",
+		);
+	}
+
+	async function cmdSandboxConfig(_subArgs: string, ctx: { ui: ExtensionUIContext }) {
+		const sbx = getSbx();
+		const hostCwd = sbx?.hostCwd ?? localCwd;
+		const cfg = loadSandboxProjectConfig(hostCwd);
+		const imageRef = imageRefForTag(cfg.image, cfg.tag);
+		const lines: string[] = [
+			`📋 Sandbox project config (.pi/agent/sandbox.json):`,
+			`  Image:  ${imageRef}`,
+			`  Pinned: ${cfg.pinned ? "yes" : "no"}`,
+			`  Last digest: ${cfg.lastDigest?.slice(0, 19) ?? "—"}...`,
+			`  Last checked: ${cfg.lastCheckedAt ? new Date(cfg.lastCheckedAt).toISOString() : "never"}`,
+			``,
+			`Commands:`,
+			`  /sandbox status        Show container status`,
+			`  /sandbox allow <path>  Grant session read access to a host path`,
+			`  /sandbox paths [revoke <path>]  List/revoke path approvals`,
+			`  /sandbox update        Pull the latest image`,
+			`  /sandbox pin <tag>     Pin to a specific version tag (e.g. v1.0.0)`,
+			`  /sandbox unpin         Unpin and follow the default tag again`,
+		];
+
+		const configPath = getSandboxConfigPath(hostCwd);
+		if (!existsSync(configPath)) {
+			lines.push(`(no config file yet — will be created on first pin/update)`);
+		}
+
+		ctx.ui.notify(lines.join("\n"), "info");
+	}
+
+	async function cmdSandboxPin(tag: string, ctx: { ui: ExtensionUIContext }) {
+		if (!tag) {
+			ctx.ui.notify("Usage: /sandbox pin <tag>\n  e.g. /sandbox pin v1.0.0", "info");
+			return;
+		}
+		const hostCwd = getSbx()?.hostCwd ?? localCwd;
+		const cfg = loadSandboxProjectConfig(hostCwd);
+		// If tag looks like a full image ref (contains a slash), extract just the tag part
+		const cleanTag = tag.replace(/^.*?\//, "");
+		cfg.tag = cleanTag;
+		cfg.pinned = true;
+		saveSandboxProjectConfig(hostCwd, cfg);
+		ctx.ui.notify(
+			`📌 Pinned sandbox image to ${imageRefForTag(cfg.image, cfg.tag)}\n` +
+			`   Set ${getSandboxConfigPath(hostCwd)}`,
+			"info",
+		);
+	}
+
+	async function cmdSandboxUnpin(_subArgs: string, ctx: { ui: ExtensionUIContext }) {
+		const hostCwd = getSbx()?.hostCwd ?? localCwd;
+		const cfg = loadSandboxProjectConfig(hostCwd);
+		if (!cfg.pinned) {
+			ctx.ui.notify("Sandbox image is not pinned. Nothing to unpin.", "info");
+			return;
+		}
+		cfg.tag = DEFAULT_SANDBOX_PROJECT_CONFIG.tag;
+		cfg.pinned = false;
+		saveSandboxProjectConfig(hostCwd, cfg);
+		ctx.ui.notify(
+			`🔓 Unpinned sandbox image — will follow tag "${cfg.tag}"\n` +
+			`   Run \`/sandbox update\` to pull the latest.`,
+			"info",
+		);
+	}
+
+	// ── Main /sandbox command with subcommands ────────────────────────────
+
 	pi.registerCommand("sandbox", {
-		description: "Show sandbox status",
-		handler: async (_args, ctx) => {
-			const sbx = getSbx();
-			if (!sbx) {
-				ctx.ui.notify("Sandbox is not active. Start pi with --container.", "info");
-				return;
+		description: "Sandbox management. Subcommands: status, allow, paths, update, config, pin, unpin",
+		handler: async (args, ctx) => {
+			const parts = args.trim().split(/\s+/);
+			const sub = parts[0]?.toLowerCase() || "status";
+
+			switch (sub) {
+				case "status":
+				case "info":
+					return cmdSandboxStatus(parts.slice(1).join(" "), ctx);
+				case "allow":
+					return cmdSandboxAllow(parts.slice(1).join(" "), ctx);
+				case "paths": {
+					if (parts[1] === "revoke" && parts[2]) {
+						return cmdSandboxPathsRevoke(parts.slice(2).join(" "), ctx);
+					}
+					return cmdSandboxPathsList(ctx);
+				}
+				case "update":
+				case "upgrade":
+					return cmdSandboxUpdate(parts.slice(1).join(" "), ctx);
+				case "config":
+				case "settings":
+					return cmdSandboxConfig(parts.slice(1).join(" "), ctx);
+				case "pin":
+					return cmdSandboxPin(parts.slice(1).join(" "), ctx);
+				case "unpin":
+					return cmdSandboxUnpin(parts.slice(1).join(" "), ctx);
+				default:
+					ctx.ui.notify(
+						`Unknown subcommand: ${sub}\n` +
+						`Available: status, allow, paths [revoke], update, config, pin, unpin`,
+						"info",
+					);
 			}
-			const info = (await execCapture(sbx, "id; uname -a; df -h /workspace | tail -1")).toString();
-			const resParts: string[] = [];
-			if (sbx.resources?.memory) resParts.push(`memory: ${sbx.resources.memory}`);
-			if (sbx.resources?.cpus) resParts.push(`cpus: ${sbx.resources.cpus}`);
-			if (sbx.resources?.disk) resParts.push(`disk: ${sbx.resources.disk}`);
-			if (sbx.resources?.swap !== undefined) resParts.push(`swap: ${sbx.resources.swap}`);
-			if (sbx.resources?.pidsLimit !== undefined) resParts.push(`pids-limit: ${sbx.resources.pidsLimit}`);
-			const resStr = resParts.length ? `\nresources: ${resParts.join(", ")}` : "";
-			const reusableStr = sbx.isReusable ? ` [re-usable${sbx.isReattached ? ", reattached" : ""}]` : "";
-			ctx.ui.notify(
-				`Sandbox: ${sbx.runtime.kind} container ${sbx.name}${reusableStr}\nhost cwd: ${sbx.hostCwd}${resStr}\n${info}`,
-				"info",
-			);
 		},
 	});
 
+	// ── Backwards-compatible aliases (silent, no deprecation notice) ───────
+
 	pi.registerCommand("sandbox-allow", {
-		description: "Allow the sandbox to read files from a host path (added for this session)",
-		handler: async (args, ctx) => {
-			const sbx = getSbx();
-			if (!sbx) {
-				ctx.ui.notify("Sandbox is not active.", "info");
-				return;
-			}
-			const raw = args.trim();
-			if (!raw) {
-				ctx.ui.notify("Usage: /sandbox-allow <host-path>\nAdds a host path prefix for read access from the sandbox.", "info");
-				return;
-			}
-			const abs = raw.startsWith("~") ? resolvePath(homedir(), raw.slice(1)) : resolvePath(raw);
-			if (sbx.allowedExternalPrefixes.includes(abs)) {
-				ctx.ui.notify(`Path ${abs} is already allowed.`, "info");
-				return;
-			}
-			if (!existsSync(abs)) {
-				ctx.ui.notify(`Path ${abs} does not exist on host.`, "warning");
-				return;
-			}
-			sbx.allowedExternalPrefixes.push(abs);
-			ctx.ui.notify(`Sandbox: read access now allowed for ${abs}`, "info");
-		},
+		description: "Allow external path access (alias for /sandbox allow)",
+		handler: async (args, ctx) => cmdSandboxAllow(args.trim(), ctx),
 	});
 
 	pi.registerCommand("sandbox-paths", {
-		description: "List or revoke persisted external path approvals",
+		description: "List/revoke path approvals (alias for /sandbox paths)",
 		handler: async (args, ctx) => {
-			const store = pathApprovals;
-			if (!store) {
-				ctx.ui.notify("Path approval store not initialized.", "info");
-				return;
-			}
 			const parts = args.trim().split(/\s+/);
-			const sub = parts[0];
-
-			if (sub === "revoke" && parts[1]) {
-				const target = parts.slice(1).join(" ");
-				const abs = target.startsWith("~") ? resolvePath(homedir(), target.slice(1)) : resolvePath(target);
-				if (store.revoke(abs)) {
-					ctx.ui.notify(`Revoked path approval: ${abs}`, "info");
-				} else {
-					ctx.ui.notify(`No approval found for: ${abs}`, "warning");
-				}
-				return;
+			if (parts[0] === "revoke" && parts[1]) {
+				return cmdSandboxPathsRevoke(parts.slice(1).join(" "), ctx);
 			}
-
-			const records = store.list();
-			if (records.length === 0) {
-				ctx.ui.notify("No persisted path approvals. External reads will prompt interactively.", "info");
-				return;
-			}
-			const lines = records.map((r) => {
-				const expiry = r.expiresAt === Infinity ? "always" : `expires ${new Date(r.expiresAt).toISOString()}`;
-				return `  ${r.path} (${expiry})`;
-			});
-			ctx.ui.notify(
-				[
-					`Persisted path approvals (${records.length}):`,
-					...lines,
-					"",
-					"Use /sandbox-paths revoke <path> to revoke an approval.",
-				].join("\n"),
-				"info",
-			);
+			return cmdSandboxPathsList(ctx);
 		},
 	});
 }

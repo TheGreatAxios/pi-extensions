@@ -89,10 +89,54 @@ When the agent tries to read a file outside the project cwd, the sandbox prompts
 Approvals are stored in `~/.pi/agent/path-approvals.json` and support prefix matching (approving a directory grants access to all files under it).
 
 Commands:
-- `/sandbox-allow <path>` — grant session-only access without prompting
-- `/sandbox-paths` — list persisted path approvals
-- `/sandbox-paths revoke <path>` — revoke a persisted approval
+- `/sandbox status` — show sandbox container status (resources, uptime)
+- `/sandbox allow <path>` — grant session-only read access to an external host path
+- `/sandbox paths` — list persisted path approvals
+- `/sandbox paths revoke <path>` — revoke a persisted approval
+- `/sandbox update` — pull the latest sandbox image from Docker Hub
+- `/sandbox config` — show current `.pi/agent/sandbox.json` config
+- `/sandbox pin <tag>` — pin project to a specific image tag (e.g. `v1.0.0`)
+- `/sandbox unpin` — unpin and follow `latest` again
 
-Non-interactive mode (no UI): external reads are blocked unless pre-approved via `--container-allow-paths` or `/sandbox-allow`.
+Aliases (still work, zero noise):
+- `/sandbox-allow <path>` → `/sandbox allow`
+- `/sandbox-paths` → `/sandbox paths`
+- `/sandbox-paths revoke <path>` → `/sandbox paths revoke`
+
+Non-interactive mode (no UI): external reads are blocked unless pre-approved via `--container-allow-paths` or `/sandbox allow`.
+
+### Per-Project Version Pinning
+
+Create `.pi/agent/sandbox.json` in your project to pin a specific sandbox image version.
+This lets different projects use different sandbox versions without conflicts:
+
+```json
+{
+  "image": "thegreataxios/pi-sandbox",
+  "tag": "v1.0.0",
+  "pinned": true
+}
+```
+
+Or via commands:
+```
+/sandbox pin v1.0.0    # pin this project to v1.0.0
+/sandbox unpin          # unpin, follow latest again
+/sandbox update         # pull the currently configured tag
+```
+
+### Automatic Version Checking
+
+On session start, pi-sandbox checks Docker Hub once per day for a new image digest.
+If a newer version of the configured tag is found, it notifies you:
+
+> 📦 New sandbox image available: thegreataxios/pi-sandbox:latest
+> Run `/sandbox update` to pull the update.
+
+Version checking is skipped when:
+- You use `--container-image` flag (manual override)
+- The tag is pinned (`pinned: true` in sandbox.json)
+- Less than 24 hours since last check
+- Network is unavailable
 
 > **⚠️ Dockerfile changes require rebuild.** Run `bun run build` after modifying `docker/Dockerfile`. Changes to `index.ts` take effect immediately.

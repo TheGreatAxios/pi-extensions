@@ -30,8 +30,6 @@ RUN apt-get update \
         jq \
         less \
         make \
-        python3 \
-        python3-venv \
         ripgrep \
         sed \
         tar \
@@ -123,6 +121,17 @@ RUN dl-verify \
  && mv /tmp/uv-${ARCH}-unknown-linux-gnu/uv /usr/local/bin/uv \
  && mv /tmp/uv-${ARCH}-unknown-linux-gnu/uvx /usr/local/bin/uvx \
  && rm -rf /tmp/uv.tar.gz /tmp/uv-${ARCH}-unknown-linux-gnu
+
+# ── Python 3.13.9 via uv ──────────────────────────────────────────
+# Replace apt python3 with a uv-managed Python 3.13.9.
+# UV_PYTHON_DIR is set to /opt/uv-python so the installation is
+# accessible to all users (not just root).
+ENV UV_PYTHON_DIR=/opt/uv-python
+RUN uv python install 3.13.9 \
+ && PYTHON_BIN=$(uv python find 3.13.9) \
+ && ln -sf "$PYTHON_BIN" /usr/local/bin/python3 \
+ && ln -sf "$PYTHON_BIN" /usr/local/bin/python \
+ && python3 --version
 
 # ── Wrapper scripts: modern tools override legacy commands ──────────
 # IMPORTANT: The sandbox agent runs commands via `sh -c` (dash shell).
