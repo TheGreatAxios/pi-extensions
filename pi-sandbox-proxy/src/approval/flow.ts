@@ -96,10 +96,15 @@ export async function requestApproval(
 	options.push(`Use once`);
 	options.push(`Deny`);
 
-	const choice = await ctx.select(
-		"Security Approval Required",
-		options,
-	);
+	let choice: string | undefined;
+	try {
+		choice = await ctx.select(
+			"Security Approval Required",
+			options,
+		);
+	} catch {
+		return { blocked: true, reason: "Security approval cancelled" };
+	}
 
 	if (!choice || choice.includes("Deny")) {
 		return { blocked: true, reason: "User denied approval" };

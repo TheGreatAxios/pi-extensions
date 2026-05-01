@@ -31,7 +31,7 @@ import { isBashToolResult } from "@mariozechner/pi-coding-agent";
 import { loadConfig } from "./src/config/loader";
 import { parseCommand } from "./src/parsers/index";
 import { ApprovalStore } from "./src/approval/store";
-import { SecurityPipeline } from "./src/security/pipeline";
+import { SecurityPipeline, type PipelineResult } from "./src/security/pipeline";
 import { detectPromptInjection } from "./src/detection/prompt-injection";
 import { AuditLog } from "./src/util/log";
 import { DomainWhitelist } from "./src/proxy/whitelist";
@@ -153,7 +153,17 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 
-		const result = await pipeline.check(parsed, ctx.ui);
+		pendingApprovals++;
+		let result: PipelineResult;
+		try {
+			result = await pipeline.check(parsed, ctx.ui);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			auditLog.log({ action: "blocked", subject: parsed.raw, reason });
+			return { block: true, reason: reason || "Security approval cancelled" };
+		} finally {
+			pendingApprovals--;
+		}
 
 		if (result.blocked) {
 			auditLog.log({ action: "blocked", subject: parsed.raw, reason: result.reason });
@@ -171,8 +181,6 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (result.approved) {
-			pendingApprovals++;
-
 			// If domain wildcard was approved, add to proxy whitelist
 			if (result.approvedDomains) {
 				for (const domain of result.approvedDomains) {

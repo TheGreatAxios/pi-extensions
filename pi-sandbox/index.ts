@@ -584,10 +584,15 @@ async function requestPathApproval(
 		`Deny`,
 	];
 
-	const choice = await ui.select(
-		`Sandbox: External File Access`,
-		options,
-	);
+	let choice: string | undefined;
+	try {
+		choice = await ui.select(
+			`Sandbox: External File Access`,
+			options,
+		);
+	} catch {
+		return false;
+	}
 
 	if (!choice || choice.includes("Deny")) return false;
 
@@ -685,6 +690,11 @@ function isAllowedExternalResource(hostPath: string, allowedPrefixes: string[]):
  * Check if a host path falls inside the project cwd.
  */
 function isInsideCwd(hostPath: string, hostCwd: string): boolean {
+	// Tool calls may use container-absolute paths because the agent sees
+	// the sandbox cwd as /workspace. Those paths are inside the project
+	// mount even though resolvePath(hostCwd, "/workspace/...") would
+	// otherwise look like an external host path and trigger approval.
+	if (hostPath === REMOTE_ROOT || hostPath.startsWith(`${REMOTE_ROOT}/`)) return true;
 	const abs = resolvePath(hostCwd, hostPath);
 	return abs === hostCwd || abs.startsWith(`${hostCwd}/`);
 }
