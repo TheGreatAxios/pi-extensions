@@ -93,6 +93,24 @@ const TIER_SPECS: Record<SizeTier, TierSpec> = {
 	xxlg: { memory: "32g", swap: "4g", cpus: "16", disk: "80g" },
 };
 
+/** Parse a human-readable size string (e.g., "2g", "512m") to bytes */
+function parseBytesToBytes(s: string): number {
+	const match = s.match(/^(\d+(?:\.\d+)?)\s*(b|k|m|g|t)?$/i);
+	if (!match) return 0;
+	const val = parseFloat(match[1]);
+	const unit = (match[2] ?? "b").toLowerCase();
+	const multipliers: Record<string, number> = { b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
+	return Math.round(val * (multipliers[unit] ?? 1));
+}
+
+/** Format bytes back to the largest whole unit (e.g., 3221225472 → "3g") */
+function formatBytes(bytes: number): string {
+	if (bytes >= 1024 ** 3 && bytes % (1024 ** 3) === 0) return `${bytes / (1024 ** 3)}g`;
+	if (bytes >= 1024 ** 2 && bytes % (1024 ** 2) === 0) return `${bytes / (1024 ** 2)}m`;
+	if (bytes >= 1024 && bytes % 1024 === 0) return `${bytes / 1024}k`;
+	return `${bytes}b`;
+}
+
 function parseSizeTier(tier: string): SizeTier | null {
 	if (tier in TIER_SPECS) return tier as SizeTier;
 	return null;
@@ -301,7 +319,13 @@ function dockerRuntime(): Runtime {
 				args.push("--storage-opt", `size=${disk}`);
 			}
 			if (swap !== undefined) {
-				args.push("--memory-swap", swap === "0" ? "0" : swap);
+				if (swap === "0") {
+					args.push("--memory-swap", "0"); // 0 = unlimited swap
+				} else {
+					// Docker --memory-swap = RAM + swap (total), tier spec stores swap-only portion
+					const totalSwap = parseBytesToBytes(memory) + parseBytesToBytes(swap);
+					args.push("--memory-swap", formatBytes(totalSwap));
+				}
 			}
 			if (!allowNetwork) args.push("--network", "none");
 			args.push(image, "sleep", "infinity");

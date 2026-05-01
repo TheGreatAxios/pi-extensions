@@ -1,0 +1,45 @@
+{
+	"name": "pi-thegreataxios-staples",
+	"version": "0.1.0",
+	"description": "Personal staple extensions for pi coding-agent — protected paths and plan mode",
+	"license": "MIT",
+	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/thegreataxios/pi-extensions.git",
+		"directory": "pi-thegreataxios-staples"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"protected-paths",
+		"plan-mode",
+		"security",
+		"file-protection"
+	],
+	"type": "module",
+	"main": "index.ts",
+	"files": [
+		"index.ts",
+		"features/",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"check": "tsc --noEmit",
+		"clean": "echo 'nothing to clean'",
+		"prepublishOnly": "bun run check"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"dependencies": {
+		"@mariozechner/pi-coding-agent": "^0.70.6"
+	},
+	"devDependencies": {
+		"@types/node": "^25.6.0",
+		"typescript": "~6.0.3"
+	}
+}
