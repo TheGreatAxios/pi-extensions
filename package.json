@@ -1,7 +1,7 @@
 {
 	"name": "pi-extensions",
 	"private": true,
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "pi coding-agent extensions: container sandbox + security proxy",
 	"license": "MIT",
 	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
