@@ -29,6 +29,7 @@ RUN apt-get update \
         git \
         jq \
         less \
+        libatomic1 \
         make \
         ripgrep \
         sed \
@@ -213,7 +214,9 @@ RUN dl-verify \
       /tmp/node.tar.xz \
  && tar xf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
  && ln -sf /usr/local/bin/node /usr/local/bin/nodejs \
- && rm -f /tmp/node.tar.xz
+ && rm -f /tmp/node.tar.xz \
+ && node --version \
+ && npm --version
 
 # Remove the build helper — no longer needed, reduces attack surface
 RUN rm -f /usr/local/bin/dl-verify

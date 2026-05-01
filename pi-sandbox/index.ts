@@ -21,7 +21,7 @@
  *     cannot ask the sandbox to read /etc/passwd on the host.
  *     EXCEPTION: pi clipboard temp files (basename "pi-clipboard-*") are read
  *     directly from the host. Additional paths can be allowed via
- *     --container-allow-paths or /sandbox-allow.
+ *     --container-allow-paths or /sandbox allow.
  *
  * Usage:
  *   Docker: image is pulled automatically from Docker Hub on first run.
@@ -358,6 +358,10 @@ interface Sandbox {
 	allowedExternalPrefixes: string[];
 	/** Resource limits applied to the container. */
 	resources?: RunArgs["resources"];
+	/** Image reference used for this sandbox, e.g. thegreataxios/pi-sandbox:latest. */
+	imageRef: string;
+	/** Project image config in effect when the sandbox started. */
+	projectConfig: SandboxProjectConfig;
 	/** Whether this sandbox is re-usable across sessions. */
 	isReusable: boolean;
 	/** Whether this sandbox was reattached (vs newly created). */
@@ -517,6 +521,18 @@ function imageRefForTag(image: string, tag: string): string {
 	return `${image}:${tag}`;
 }
 
+async function inspectLocalImageDigest(runtime: Runtime, imageRef: string): Promise<string | null> {
+	const result = await spawnWithTimeout(runtime.bin, ["image", "inspect", imageRef, "--format", "{{json .RepoDigests}}"], 10000);
+	if (result.code !== 0 || result.timedOut) return null;
+	try {
+		const digests = JSON.parse(result.stdout.trim()) as string[];
+		const digest = digests.find((d) => d.includes("@sha256:")) ?? null;
+		return digest?.split("@", 2)[1] ?? null;
+	} catch {
+		return null;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Docker Hub version checker
 // ---------------------------------------------------------------------------
@@ -562,7 +578,7 @@ async function requestPathApproval(
 	store: PathApprovalStore,
 	ui: ExtensionUIContext,
 ): Promise<boolean> {
-	// 1. Check session-level prefixes (--container-allow-paths, /sandbox-allow)
+	// 1. Check session-level prefixes (--container-allow-paths, /sandbox allow)
 	for (const prefix of sessionPrefixes) {
 		if (absPath === prefix || absPath.startsWith(prefix + "/")) return true;
 	}
@@ -672,7 +688,7 @@ function isReadOnlyMount(containerPath: string, mounts: MountSpec[]): boolean {
 /**
  * Check whether an external host path is allowed for read access.
  * Default: pi clipboard temp files (basename starts with "pi-clipboard-").
- * Additional prefixes can be added via --container-allow-paths or /sandbox-allow.
+ * Additional prefixes can be added via --container-allow-paths or /sandbox allow.
  */
 function isAllowedExternalResource(hostPath: string, allowedPrefixes: string[]): boolean {
 	const abs = resolvePath(hostPath);
@@ -1266,6 +1282,8 @@ export default function (pi: ExtensionAPI) {
 				mounts: skillMounts,
 				allowedExternalPrefixes,
 				resources,
+				imageRef: image,
+				projectConfig,
 				isReusable,
 				isReattached,
 			};
@@ -1370,10 +1388,15 @@ export default function (pi: ExtensionAPI) {
 	async function cmdSandboxStatus(_subArgs: string, ctx: { ui: ExtensionUIContext }) {
 		const sbx = getSbx();
 		if (!sbx) {
-			ctx.ui.notify("Sandbox is not active. Start pi with --container.", "info");
+			const cfg = loadSandboxProjectConfig(localCwd);
+			ctx.ui.notify(
+				`Sandbox is not active. Start pi with --container.\nconfigured image: ${imageRefForTag(cfg.image, cfg.tag)} (${cfg.pinned ? "pinned" : "unpinned"})`,
+				"info",
+			);
 			return;
 		}
 		const info = (await execCapture(sbx, "id; uname -a; df -h /workspace | tail -1")).toString();
+		const localDigest = await inspectLocalImageDigest(sbx.runtime, sbx.imageRef);
 		const resParts: string[] = [];
 		if (sbx.resources?.memory) resParts.push(`memory: ${sbx.resources.memory}`);
 		if (sbx.resources?.cpus) resParts.push(`cpus: ${sbx.resources.cpus}`);
@@ -1382,8 +1405,19 @@ export default function (pi: ExtensionAPI) {
 		if (sbx.resources?.pidsLimit !== undefined) resParts.push(`pids-limit: ${sbx.resources.pidsLimit}`);
 		const resStr = resParts.length ? `\nresources: ${resParts.join(", ")}` : "";
 		const reusableStr = sbx.isReusable ? ` [re-usable${sbx.isReattached ? ", reattached" : ""}]` : "";
+		const cfg = sbx.projectConfig;
 		ctx.ui.notify(
-			`Sandbox: ${sbx.runtime.kind} container ${sbx.name}${reusableStr}\nhost cwd: ${sbx.hostCwd}${resStr}\n${info}`,
+			[
+				`Sandbox: ${sbx.runtime.kind} container ${sbx.name}${reusableStr}`,
+				`host cwd: ${sbx.hostCwd}`,
+				`image: ${sbx.imageRef} (${cfg.pinned ? "pinned" : "unpinned"})`,
+				`local digest: ${localDigest ?? "unknown"}`,
+				`last seen remote digest: ${cfg.lastDigest ?? "unknown"}`,
+				`last update check: ${cfg.lastCheckedAt ? new Date(cfg.lastCheckedAt).toISOString() : "never"}`,
+				`update: run /sandbox update, then restart pi to use the new image`,
+				resStr.trim(),
+				info.trimEnd(),
+			].filter(Boolean).join("\n"),
 			"info",
 		);
 	}
@@ -1487,6 +1521,31 @@ export default function (pi: ExtensionAPI) {
 		);
 	}
 
+	async function cmdSandboxDoctor(_subArgs: string, ctx: { ui: ExtensionUIContext }) {
+		const sbx = getSbx();
+		if (!sbx) {
+			ctx.ui.notify("Sandbox is not active. Start pi with --container.", "info");
+			return;
+		}
+		const script = [
+			"set -u",
+			"for cmd in sh bash git rg fd bat eza jq yq ast-grep uv python python3 bun bunx node npm chromium; do",
+			"  if command -v $cmd >/dev/null 2>&1; then printf 'ok   %s -> %s\\n' $cmd $(command -v $cmd); else printf 'MISS %s\\n' $cmd; fi",
+			"done",
+			"echo",
+			"bun --version 2>&1 | sed 's/^/bun: /'",
+			"node --version 2>&1 | sed 's/^/node: /'",
+			"npm --version 2>&1 | sed 's/^/npm: /'",
+			"python --version 2>&1 | sed 's/^/python: /'",
+			"uv --version 2>&1 | sed 's/^/uv: /'",
+			"chromium --version 2>&1 | sed 's/^/chromium: /'",
+			"echo",
+			"ldd $(command -v node) | sed 's/^/node ldd: /'",
+		].join("\n");
+		const out = (await execCapture(sbx, script, 20000)).toString();
+		ctx.ui.notify(`Sandbox doctor:\n${out}`, "info");
+	}
+
 	async function cmdSandboxConfig(_subArgs: string, ctx: { ui: ExtensionUIContext }) {
 		const sbx = getSbx();
 		const hostCwd = sbx?.hostCwd ?? localCwd;
@@ -1503,6 +1562,7 @@ export default function (pi: ExtensionAPI) {
 			`  /sandbox status        Show container status`,
 			`  /sandbox allow <path>  Grant session read access to a host path`,
 			`  /sandbox paths [revoke <path>]  List/revoke path approvals`,
+			`  /sandbox doctor       Check core tools inside the container`,
 			`  /sandbox update        Pull the latest image`,
 			`  /sandbox pin <tag>     Pin to a specific version tag (e.g. v1.0.0)`,
 			`  /sandbox unpin         Unpin and follow the default tag again`,
@@ -1555,7 +1615,7 @@ export default function (pi: ExtensionAPI) {
 	// ── Main /sandbox command with subcommands ────────────────────────────
 
 	pi.registerCommand("sandbox", {
-		description: "Sandbox management. Subcommands: status, allow, paths, update, config, pin, unpin",
+		description: "Sandbox management. Subcommands: status, doctor, allow, paths, update, config, pin, unpin",
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0]?.toLowerCase() || "status";
@@ -1564,6 +1624,9 @@ export default function (pi: ExtensionAPI) {
 				case "status":
 				case "info":
 					return cmdSandboxStatus(parts.slice(1).join(" "), ctx);
+				case "doctor":
+				case "check":
+					return cmdSandboxDoctor(parts.slice(1).join(" "), ctx);
 				case "allow":
 					return cmdSandboxAllow(parts.slice(1).join(" "), ctx);
 				case "paths": {
@@ -1585,28 +1648,11 @@ export default function (pi: ExtensionAPI) {
 				default:
 					ctx.ui.notify(
 						`Unknown subcommand: ${sub}\n` +
-						`Available: status, allow, paths [revoke], update, config, pin, unpin`,
+						`Available: status, doctor, allow, paths [revoke], update, config, pin, unpin`,
 						"info",
 					);
 			}
 		},
 	});
 
-	// ── Backwards-compatible aliases (silent, no deprecation notice) ───────
-
-	pi.registerCommand("sandbox-allow", {
-		description: "Allow external path access (alias for /sandbox allow)",
-		handler: async (args, ctx) => cmdSandboxAllow(args.trim(), ctx),
-	});
-
-	pi.registerCommand("sandbox-paths", {
-		description: "List/revoke path approvals (alias for /sandbox paths)",
-		handler: async (args, ctx) => {
-			const parts = args.trim().split(/\s+/);
-			if (parts[0] === "revoke" && parts[1]) {
-				return cmdSandboxPathsRevoke(parts.slice(1).join(" "), ctx);
-			}
-			return cmdSandboxPathsList(ctx);
-		},
-	});
 }

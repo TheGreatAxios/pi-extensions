@@ -93,15 +93,11 @@ Commands:
 - `/sandbox allow <path>` — grant session-only read access to an external host path
 - `/sandbox paths` — list persisted path approvals
 - `/sandbox paths revoke <path>` — revoke a persisted approval
+- `/sandbox doctor` — verify core tools inside the container (node, bun, python, uv, chromium, etc.)
 - `/sandbox update` — pull the latest sandbox image from Docker Hub
 - `/sandbox config` — show current `.pi/agent/sandbox.json` config
 - `/sandbox pin <tag>` — pin project to a specific image tag (e.g. `v1.0.0`)
 - `/sandbox unpin` — unpin and follow `latest` again
-
-Aliases (still work, zero noise):
-- `/sandbox-allow <path>` → `/sandbox allow`
-- `/sandbox-paths` → `/sandbox paths`
-- `/sandbox-paths revoke <path>` → `/sandbox paths revoke`
 
 Non-interactive mode (no UI): external reads are blocked unless pre-approved via `--container-allow-paths` or `/sandbox allow`.
 
