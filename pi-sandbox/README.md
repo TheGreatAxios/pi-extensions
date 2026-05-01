@@ -97,6 +97,28 @@ status.
 | `--container-image <name>`    | `pi-sandbox:latest`       | Use a different image.                                  |
 | `--container-net`             | off                       | Allow outbound network (for `npm install`, `pip`, etc.).|
 | `--container-keep`            | off                       | Don't stop the container on exit (for post-mortem).     |
+| `--container-memory <limit>`  | `2g`                      | Memory limit (e.g., `10g`, `512m`, `1gb`).              |
+| `--container-cpus <count>`    | `2`                       | CPU limit (e.g., `4`, `0.5`, `1.5`).                    |
+| `--container-pids-limit <n>`  | `512`                     | Max processes (Docker only).                            |
+| `--container-swap <limit>`    | unset                     | Swap limit (Docker only, e.g., `1g`, `0` to disable).   |
+
+### Resource Configuration
+
+By default, the sandbox gets 2GB RAM and 2 CPUs. For heavier workloads:
+
+```bash
+# 10GB RAM for large builds
+pi --container-memory 10g
+
+# More CPUs for parallel compilation
+pi --container-cpus 4
+
+# Combined: high-resource sandbox
+pi --container-memory 16g --container-cpus 8 --container-pids-limit 1024
+```
+
+**Apple container** supports: `--container-memory`, `--container-cpus`  
+**Docker** supports all flags including `--container-pids-limit` and `--container-swap`
 
 ### Auto-discovery (recommended once you trust it)
 

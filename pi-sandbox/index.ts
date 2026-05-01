@@ -2,7 +2,7 @@
  * pi-container-sandbox
  * --------------------
  * Run every read/write/edit/bash operation pi performs inside a per-session
- * Linux container. Supports Apple's `container` CLI and Docker.
+ * Linux container (Docker only).
  *
  * Threat model:
  *   - The agent's bash and file tools never touch the host filesystem outside
@@ -12,8 +12,9 @@
  *     SSH agent, no Docker socket).
  *   - Network is enabled by default; the security proxy gates outbound traffic.
  *     Disable with --no-container-net.
- *     ⚠️  Apple container uses --no-dns + route deletion; Docker uses --network none (when disabled).
- *   - Resource caps (2 CPUs / 2 GiB RAM) limit blast radius of runaway code.
+ *     Docker uses --network none (when disabled).
+ *   - Resource caps via size tiers (xs, sm, md, lg, xlg, xxlg) limit blast radius.
+ *     Override with --container-size or individual --container-memory, --container-cpus, etc.
  *
  * Path safety:
  *   - Any tool path resolved outside of cwd is rejected. The agent literally
@@ -24,19 +25,33 @@
  *
  * Usage:
  *   Docker: image is pulled automatically from Docker Hub on first run.
- *   Apple container: build manually first:
- *        container build -t thegreataxios/pi-sandbox:latest -f docker/Dockerfile docker
  *   Then run pi with the extension (sandbox is ON by default):
  *        pi -e ./index.ts
  *      Optional flags:
- *        --container-runtime docker|apple  (default: auto-detect, prefer apple)
- *        --container-image <name>          (default: thegreataxios/pi-sandbox:latest)
- *        --container-net                   (allow outbound network)
- *        --prawl, --browser                 (alias for --container-net)
- *        --container-keep                  (don't stop the container on exit)
- *        --container-mount-skills           (mount ~/.agents/skills & ~/.pi/agent/skills read-only at /skills; default: on)
- *        --container-mount-paths <paths>    (comma-separated extra host dirs to mount at /skills/<basename>)
- *        --no-container, --noc             (bypass entirely)
+ *        --container-size xs|sm|md|lg|xlg|xxlg (default: sm)
+ *        --sandbox-name <name>                 (re-usable sandbox; reattaches if exists)
+ *        --sandbox-persist                     (keep container after pi exits)
+ *        --sandbox-cache <volume>              (persistent cache volume at /cache)
+ *        --container-image <name>            (default: thegreataxios/pi-sandbox:latest)
+ *        --container-net                     (allow outbound network)
+ *        --prawl, --browser                  (alias for --container-net)
+ *        --container-keep                    (don't stop the container on exit)
+ *        --container-mount-skills            (mount ~/.agents/skills & ~/.pi/agent/skills read-only at /skills; default: on)
+ *        --container-mount-paths <paths>     (comma-separated extra host dirs to mount at /skills/<basename>)
+ *        --container-memory <limit>          (e.g., 10g, 512m)
+ *        --container-cpus <count>            (e.g., 4, 0.5)
+ *        --container-pids-limit <n>          (max processes; default: 512)
+ *        --container-swap <limit>            (swap limit, e.g., 1g)
+ *        --no-container, --noc               (bypass entirely)
+ *
+ * Config file (.pi/config.json):
+ *   {
+ *     "sandbox": {
+ *       "size": "lg",
+ *       "persist": true,
+ *       "cacheVolume": "my-project-cache"
+ *     }
+ *   }
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -57,10 +72,58 @@ import {
 } from "@mariozechner/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
-// Runtime abstraction (Apple `container` and Docker speak the same dialect)
+// Size tier configuration
 // ---------------------------------------------------------------------------
 
-type RuntimeKind = "apple" | "docker";
+type SizeTier = "xs" | "sm" | "md" | "lg" | "xlg" | "xxlg";
+
+interface TierSpec {
+	memory: string;
+	swap: string;
+	cpus: string;
+	disk: string;
+}
+
+const TIER_SPECS: Record<SizeTier, TierSpec> = {
+	xs: { memory: "512m", swap: "512m", cpus: "0.5", disk: "2g" },
+	sm: { memory: "2g", swap: "1g", cpus: "1", disk: "5g" },
+	md: { memory: "4g", swap: "2g", cpus: "2", disk: "10g" },
+	lg: { memory: "8g", swap: "4g", cpus: "4", disk: "20g" },
+	xlg: { memory: "16g", swap: "4g", cpus: "8", disk: "40g" },
+	xxlg: { memory: "32g", swap: "4g", cpus: "16", disk: "80g" },
+};
+
+function parseSizeTier(tier: string): SizeTier | null {
+	if (tier in TIER_SPECS) return tier as SizeTier;
+	return null;
+}
+
+interface SandboxConfig {
+	size?: SizeTier;
+	persist?: boolean;
+	cacheVolume?: string;
+}
+
+function loadSandboxConfig(hostCwd: string): SandboxConfig | null {
+	const configPath = resolvePath(hostCwd, ".pi", "config.json");
+	if (!existsSync(configPath)) return null;
+	try {
+		const content = readFileSync(configPath, "utf-8");
+		const parsed = JSON.parse(content);
+		if (parsed?.sandbox && typeof parsed.sandbox === "object") {
+			return parsed.sandbox as SandboxConfig;
+		}
+	} catch {
+		// Invalid JSON or missing sandbox key
+	}
+	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime abstraction (Docker only for now)
+// ---------------------------------------------------------------------------
+
+type RuntimeKind = "docker";
 
 interface Runtime {
 	kind: RuntimeKind;
@@ -69,6 +132,12 @@ interface Runtime {
 	run(args: RunArgs): Promise<string>;
 	stop(name: string): void;
 	exists(image: string): Promise<boolean>;
+	/** Check if a container with the given name is running. */
+	isRunning(name: string): Promise<boolean>;
+	/** Start an existing stopped container. */
+	start(name: string): Promise<boolean>;
+	/** Create a Docker volume if it doesn't exist (Docker only). Apple container returns false. */
+	createVolume(name: string): Promise<boolean>;
 }
 
 interface MountSpec {
@@ -85,6 +154,16 @@ interface RunArgs {
 	allowNetwork: boolean;
 	/** Extra read-only bind mounts (e.g. skill directories). */
 	extraMounts?: MountSpec[];
+	/** Resource limits (undefined = use runtime default). */
+	resources?: {
+		memory?: string;  // e.g., "2g", "512m", "10gb"
+		cpus?: string;    // e.g., "2", "0.5", "4.0"
+		pidsLimit?: number; // e.g., 512 (Docker only)
+		swap?: string;    // e.g., "1g", "0" to disable (Docker only)
+		disk?: string;    // disk/storage limit (e.g., "10g", "20gb")
+	};
+	/** Optional Docker volume to mount at /cache for persistent caching. */
+	cacheVolume?: string;
 }
 
 function randomSuffix(): string {
@@ -96,43 +175,34 @@ function which(bin: string): boolean {
 	return r.status === 0;
 }
 
-async function detectRuntimeWithFallback(prefer?: RuntimeKind, ctx?: any): Promise<Runtime | null> {
-	const haveApple = which("container");
+async function detectRuntime(ctx?: any): Promise<Runtime | null> {
 	const haveDocker = which("docker");
 
-	if (!haveApple && !haveDocker) {
+	if (!haveDocker) {
 		return null;
 	}
 
-	// Determine order based on preference (Docker is preferred over Apple container)
-	const tryOrder: RuntimeKind[] = prefer === "apple" ? ["apple", "docker"] : ["docker", "apple"];
+	const runtime = dockerRuntime();
 
-	for (const kind of tryOrder) {
-		if (kind === "apple" && !haveApple) continue;
-		if (kind === "docker" && !haveDocker) continue;
-
-		const runtime = kind === "apple" ? appleRuntime() : dockerRuntime();
-
-		// Test the runtime with a quick 3s smoke test
-		const testName = `pi-test-${randomSuffix()}`;
-		try {
-			const r = await spawnWithTimeout(runtime.bin, ["run", "-d", "--rm", "--name", testName, "debian:bookworm-slim", "sleep", "infinity"], 3000);
-			if (r.code === 0 && !r.timedOut) {
-				// Clean up test container
-				runtime.stop(testName);
-				if (ctx?.ui) {
-					ctx.ui.notify(`Using ${kind} runtime (3s smoke test passed)`, "info");
-				}
-				return runtime;
+	// Test the runtime with a quick 3s smoke test
+	const testName = `pi-test-${randomSuffix()}`;
+	try {
+		const r = await spawnWithTimeout(runtime.bin, ["run", "-d", "--rm", "--name", testName, "debian:bookworm-slim", "sleep", "infinity"], 3000);
+		if (r.code === 0 && !r.timedOut) {
+			// Clean up test container
+			runtime.stop(testName);
+			if (ctx?.ui) {
+				ctx.ui.notify(`Using docker runtime (3s smoke test passed)`, "info");
 			}
-			if (r.timedOut) {
-				if (ctx?.ui) {
-					ctx.ui.notify(`${kind} runtime timed out (3s), trying fallback...`, "warning");
-				}
-			}
-		} catch {
-			// Fall through to next runtime
+			return runtime;
 		}
+		if (r.timedOut) {
+			if (ctx?.ui) {
+				ctx.ui.notify(`docker runtime timed out (3s)`, "warning");
+			}
+		}
+	} catch {
+		// Fall through
 	}
 
 	return null;
@@ -173,83 +243,6 @@ function spawnWithTimeout(
 	});
 }
 
-function appleRuntime(): Runtime {
-	const bin = "container";
-	const forceDelete = (name: string) => {
-		// Idempotent: ignore "not found" / non-zero exit. Apple's CLI doesn't
-		// distinguish errors cleanly, so we just swallow.
-		spawnSync(bin, ["delete", "--force", name], { stdio: "ignore" });
-	};
-	return {
-		kind: "apple",
-		bin,
-		exists: async (image) => {
-			const r = await spawnWithTimeout(bin, ["image", "inspect", image], 10000);
-			return r.code === 0 && !r.timedOut;
-		},
-		stop: (name) => {
-			spawnSync(bin, ["stop", name], { stdio: "ignore" });
-			forceDelete(name);
-		},
-		run: async ({ name, image, hostCwd, allowNetwork, extraMounts }) => {
-			const buildArgs = (n: string): string[] => {
-				const a: string[] = [
-					"run",
-					"-d",
-					"--rm",
-					"--name", n,
-					"--user", "1000:1000",
-					"-m", "2g",
-					"-c", "2",
-					"--mount", `type=bind,source=${hostCwd},target=/workspace`,
-					"-w", "/workspace",
-				];
-				if (extraMounts) {
-					for (const m of extraMounts) {
-						a.push("--mount", `type=bind,source=${m.source},target=${m.target},readonly`);
-					}
-				}
-				if (!allowNetwork) a.push("--no-dns"); // best-effort: blocks DNS; post-start lockdown below
-				a.push(image, "sleep", "infinity");
-				return a;
-			};
-
-			// Best-effort: nuke any stale container with the same name from a
-			// previously crashed session. Apple's `container` doesn't auto-clean
-			// like docker --rm does on abnormal exits.
-			forceDelete(name);
-
-			let currentName = name;
-			let lastErr = "";
-			// Apple's `container` CLI has a known stale-state bug where a
-			// container can simultaneously be reported as "not found" by
-			// `delete` and "already exists" by `run`. When that happens,
-			// retrying the same name is hopeless — generate a fresh name
-			// instead. We try a few attempts before giving up.
-			for (let attempt = 0; attempt < 5; attempt++) {
-				const r = await spawnWithTimeout(bin, buildArgs(currentName), 60000);
-				if (r.timedOut) {
-					throw new Error(`apple container run timed out after 60s (command: container run ${currentName})`);
-				}
-				if (r.code === 0) return currentName;
-				lastErr = (r.stderr || r.stdout || "").trim();
-				if (!/already exists/i.test(lastErr)) {
-					throw new Error(`apple container run failed: ${lastErr}`);
-				}
-				// On the first collision try a forced delete in case the
-				// CLI can actually clean it up. If that doesn't work, switch
-				// to a fresh name to sidestep the zombie registry entry.
-				if (attempt === 0) {
-					forceDelete(currentName);
-				} else {
-					currentName = `pi-sbx-${randomSuffix()}`;
-				}
-			}
-			throw new Error(`apple container run failed: ${lastErr}`);
-		},
-	};
-}
-
 function dockerRuntime(): Runtime {
 	const bin = "docker";
 	return {
@@ -262,18 +255,35 @@ function dockerRuntime(): Runtime {
 		stop: (name) => {
 			spawnSync(bin, ["stop", name], { stdio: "ignore" });
 		},
-		run: async ({ name, image, hostCwd, allowNetwork, extraMounts }) => {
+		isRunning: async (name: string) => {
+			const r = await spawnWithTimeout(bin, ["inspect", "--format", "{{.State.Running}}", name], 5000);
+			return r.code === 0 && r.stdout.trim() === "true";
+		},
+		start: async (name: string) => {
+			const r = await spawnWithTimeout(bin, ["start", name], 10000);
+			return r.code === 0 && !r.timedOut;
+		},
+		createVolume: async (name: string) => {
+			const r = await spawnWithTimeout(bin, ["volume", "create", name], 10000);
+			return r.code === 0 && !r.timedOut;
+		},
+		run: async ({ name, image, hostCwd, allowNetwork, extraMounts, resources, cacheVolume }) => {
+			const memory = resources?.memory ?? "2g";
+			const cpus = resources?.cpus ?? "2";
+			const pidsLimit = resources?.pidsLimit ?? 512;
+			const swap = resources?.swap;
+			const disk = resources?.disk;
+
 			const args: string[] = [
 				"run",
 				"-d",
-				"--rm",
 				"--name", name,
 				"--user", "1000:1000",
-				"--memory", "2g",
-				"--cpus", "2",
+				"--memory", memory,
+				"--cpus", cpus,
 				"--cap-drop", "ALL",
 				"--security-opt", "no-new-privileges",
-				"--pids-limit", "512",
+				"--pids-limit", String(pidsLimit),
 				"-v", `${hostCwd}:/workspace`,
 				"-w", "/workspace",
 			];
@@ -281,6 +291,17 @@ function dockerRuntime(): Runtime {
 				for (const m of extraMounts) {
 					args.push("-v", `${m.source}:${m.target}:ro`);
 				}
+			}
+			// Mount cache volume if provided
+			if (cacheVolume) {
+				args.push("-v", `${cacheVolume}:/cache`);
+			}
+			// Add storage/disk limit if provided (Docker supports this on some storage drivers)
+			if (disk) {
+				args.push("--storage-opt", `size=${disk}`);
+			}
+			if (swap !== undefined) {
+				args.push("--memory-swap", swap === "0" ? "0" : swap);
 			}
 			if (!allowNetwork) args.push("--network", "none");
 			args.push(image, "sleep", "infinity");
@@ -309,6 +330,12 @@ interface Sandbox {
 	mounts: MountSpec[];
 	/** Host path prefixes allowed for read access from outside cwd. */
 	allowedExternalPrefixes: string[];
+	/** Resource limits applied to the container. */
+	resources?: RunArgs["resources"];
+	/** Whether this sandbox is re-usable across sessions. */
+	isReusable: boolean;
+	/** Whether this sandbox was reattached (vs newly created). */
+	isReattached: boolean;
 }
 
 let sandbox: Sandbox | null = null;
@@ -635,8 +662,22 @@ export default function (pi: ExtensionAPI) {
 		type: "boolean",
 		default: false,
 	});
-	pi.registerFlag("container-runtime", {
-		description: "Container runtime: apple|docker (default: auto)",
+	pi.registerFlag("container-size", {
+		description: "Sandbox size tier: xs, sm (default), md, lg, xlg, xxlg. Sets memory, swap, cpu, disk limits.",
+		type: "string",
+		default: "sm",
+	});
+	pi.registerFlag("sandbox-name", {
+		description: "Re-usable sandbox name. If container exists, reattaches; otherwise creates new. Random name if omitted.",
+		type: "string",
+	});
+	pi.registerFlag("sandbox-persist", {
+		description: "Keep sandbox container running after pi exits (for re-usable sandboxes)",
+		type: "boolean",
+		default: false,
+	});
+	pi.registerFlag("sandbox-cache", {
+		description: "Docker volume name for persistent cache at /cache (auto-created if needed)",
 		type: "string",
 	});
 	pi.registerFlag("container-image", {
@@ -674,6 +715,22 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerFlag("container-allow-paths", {
 		description: "Comma-separated list of host path prefixes to allow for read access from outside the sandbox (e.g. ~/Downloads)",
+		type: "string",
+	});
+	pi.registerFlag("container-memory", {
+		description: "Memory limit for the container (e.g., 2g, 512m, 10gb). Default: 2g",
+		type: "string",
+	});
+	pi.registerFlag("container-cpus", {
+		description: "CPU limit for the container (e.g., 2, 0.5, 4.0). Default: 2",
+		type: "string",
+	});
+	pi.registerFlag("container-pids-limit", {
+		description: "Maximum number of PIDs the container can create (Docker only). Default: 512",
+		type: "string",
+	});
+	pi.registerFlag("container-swap", {
+		description: "Swap limit for the container (e.g., 1g, 0 to disable). Docker only. Default: unset",
 		type: "string",
 	});
 
@@ -751,36 +808,68 @@ export default function (pi: ExtensionAPI) {
 		if (!(pi.getFlag("container") as boolean)) return;
 
 		try {
-			const runtime = await detectRuntimeWithFallback(pi.getFlag("container-runtime") as RuntimeKind | undefined, ctx);
+			const runtime = await detectRuntime(ctx);
 			if (!runtime) {
-				ctx.ui.notify("No working container runtime found (Apple container and Docker both unavailable or timed out). Running without sandbox.", "warning");
+				ctx.ui.notify("Docker not available or timed out. Running without sandbox.", "warning");
 				return;
 			}
+
+			// Load sandbox config from .pi/config.json
+			const config = loadSandboxConfig(localCwd);
+
+			// Determine size tier (flag > config > default)
+			const sizeFlag = pi.getFlag("container-size") as string | undefined;
+			const sizeTier = parseSizeTier(sizeFlag || config?.size || "sm") || "sm";
+			const tierSpec = TIER_SPECS[sizeTier];
+
 			const image = (pi.getFlag("container-image") as string) || "thegreataxios/pi-sandbox:latest";
 			const allowNetwork = (pi.getFlag("container-net") as boolean) || (pi.getFlag("prawl") as boolean) || (pi.getFlag("browser") as boolean);
 			const keep = pi.getFlag("container-keep") as boolean;
+			const persist = pi.getFlag("sandbox-persist") as boolean || config?.persist || false;
 			const mountSkills = pi.getFlag("container-mount-skills") as boolean;
 			const extraPathsRaw = pi.getFlag("container-mount-paths") as string | undefined;
 			const extraPaths = extraPathsRaw ? extraPathsRaw.split(",").map((p) => p.trim()).filter(Boolean) : undefined;
 
+			// Determine sandbox name
+			const nameFlag = pi.getFlag("sandbox-name") as string | undefined;
+			const sandboxName = nameFlag || `pi-sbx-${randomSuffix()}`;
+			const isReusable = !!nameFlag;
+
+			// Determine cache volume
+			const cacheFlag = pi.getFlag("sandbox-cache") as string | undefined;
+			const cacheVolume = cacheFlag || config?.cacheVolume;
+
+			// Create cache volume if specified
+			if (cacheVolume) {
+				await runtime.createVolume(cacheVolume);
+			}
+
 			// Discover skill directories on the host.
 			const skillMounts = mountSkills ? discoverSkillDirs(extraPaths) : [];
 
-			if (!(await runtime.exists(image))) {
-				// Try pulling from registry (Docker only; Apple container has no pull command)
-				let pulled = false;
-				if (runtime.kind === "docker") {
-					ctx.ui.notify(`Sandbox image "${image}" not found locally, pulling from registry...`);
-					const pull = await spawnWithTimeout(runtime.bin, ["pull", image], 120000);
-					pulled = pull.code === 0 && !pull.timedOut;
+			// Check if sandbox already exists and is running (re-usable sandbox)
+			let isReattached = false;
+			if (isReusable) {
+				const running = await runtime.isRunning(sandboxName);
+				if (running) {
+					isReattached = true;
+					ctx.ui.notify(`Reattaching to existing sandbox: ${sandboxName}`, "info");
+				} else {
+					// Try to start if it exists but is stopped
+					const started = await runtime.start(sandboxName);
+					if (started) {
+						isReattached = true;
+						ctx.ui.notify(`Restarted existing sandbox: ${sandboxName}`, "info");
+					}
 				}
-				if (!pulled && !(await runtime.exists(image))) {
+			}
+
+			if (!(await runtime.exists(image))) {
+				ctx.ui.notify(`Sandbox image "${image}" not found locally, pulling from registry...`);
+				const pull = await spawnWithTimeout(runtime.bin, ["pull", image], 120000);
+				if (!pull || pull.code !== 0 || pull.timedOut) {
 					ctx.ui.notify(
-						`Sandbox image "${image}" not found.${
-							runtime.kind === "docker"
-								? " Pull failed. Build it manually:\n  docker build -t " + image + " -f docker/Dockerfile docker"
-								: " Apple container does not support pulling. Build it first:\n  container build -t " + image + " -f docker/Dockerfile docker"
-						} `,
+						`Sandbox image "${image}" not found. Pull failed. Build it manually:\n  docker build -t ${image} -f docker/Dockerfile docker`,
 						"error",
 					);
 					return;
@@ -794,13 +883,52 @@ export default function (pi: ExtensionAPI) {
 				)
 				: [];
 
-			const requestedName = `pi-sbx-${randomSuffix()}`;
-			const actualName = await runtime.run({ name: requestedName, image, hostCwd: localCwd, allowNetwork, extraMounts: skillMounts.length ? skillMounts : undefined });
-			sandbox = { runtime, name: actualName, hostCwd: localCwd, keep, mounts: skillMounts, allowedExternalPrefixes };
+			// Build resource config from tier + flag overrides
+			const resources: RunArgs["resources"] = {
+				memory: tierSpec.memory,
+				cpus: tierSpec.cpus,
+				swap: tierSpec.swap,
+				disk: tierSpec.disk,
+			};
 
-			// Belt-and-braces cleanup for ungraceful exits (Apple `container`
-			// has no equivalent of docker --rm on host-side kill). Docker's
-			// --rm mostly handles this; the handler is a no-op there.
+			// Apply flag overrides
+			const memFlag = pi.getFlag("container-memory") as string | undefined;
+			const cpusFlag = pi.getFlag("container-cpus") as string | undefined;
+			const pidsFlagRaw = pi.getFlag("container-pids-limit") as string | undefined;
+			const pidsFlag = pidsFlagRaw ? parseInt(pidsFlagRaw, 10) : undefined;
+			const swapFlag = pi.getFlag("container-swap") as string | undefined;
+			if (memFlag) resources.memory = memFlag;
+			if (cpusFlag) resources.cpus = cpusFlag;
+			if (pidsFlag !== undefined) resources.pidsLimit = pidsFlag;
+			if (swapFlag !== undefined) resources.swap = swapFlag;
+
+			// Create new sandbox if not reattaching
+			let actualName = sandboxName;
+			if (!isReattached) {
+				actualName = await runtime.run({
+					name: sandboxName,
+					image,
+					hostCwd: localCwd,
+					allowNetwork,
+					extraMounts: skillMounts.length ? skillMounts : undefined,
+					resources,
+					cacheVolume,
+				});
+			}
+
+			sandbox = {
+				runtime,
+				name: actualName,
+				hostCwd: localCwd,
+				keep: keep || persist,
+				mounts: skillMounts,
+				allowedExternalPrefixes,
+				resources,
+				isReusable,
+				isReattached,
+			};
+
+			// Cleanup handler - only stop if not keep/persist and not re-usable
 			const cleanup = () => {
 				const s = sandbox;
 				if (!s || s.keep) return;
@@ -822,47 +950,26 @@ export default function (pi: ExtensionAPI) {
 			// Smoke test (10s timeout)
 			const ok = (await execCapture(sandbox, "id -un && pwd", 10000)).toString().trim();
 
-			// Post-start network lockdown for Apple containers.
-			// --no-dns only blocks DNS resolution; the container can still
-			// make outbound TCP/UDP connections by IP. We need a hard block.
-			if (!allowNetwork && runtime.kind === "apple") {
-				try {
-					// Delete the default route so no outbound traffic leaves the container.
-					// We run as uid 1000, but `ip` may be available and the container
-					// may allow NET_ADMIN. If this fails, we warn but don't block startup.
-					await execCapture(
-						sandbox,
-						"ip route del default 2>/dev/null; ip -6 route del default 2>/dev/null; echo done",
-						5000,
-					);
-					// Verify network is actually blocked: try to reach an external IP.
-					const probe = await execCapture(
-						sandbox,
-						"timeout 3 bash -c 'echo > /dev/tcp/1.1.1.1/443' 2>&1 || echo blocked",
-						5000,
-					);
-					if (!probe.toString().includes("blocked")) {
-					ctx.ui.notify(
-						"⚠️  Sandbox network lockdown FAILED — container may have outbound access. "
-							+ "Consider using Docker runtime (--container-runtime docker) for hard network isolation.",
-						"warning",
-					);
-					}
-				} catch {
-					// Non-fatal: route deletion may not work in all Apple container configs.
-					ctx.ui.notify(
-						"⚠️  Could not enforce network isolation in Apple container. "
-							+ "Use --container-runtime docker for guaranteed network blocking.",
-						"warning",
-					);
-				}
-			}
+			// Build resource status string
+			const resParts: string[] = [
+				`size=${sizeTier}`,
+				`mem=${resources.memory}`,
+				`cpu=${resources.cpus}`,
+				`swap=${resources.swap}`,
+				`disk=${resources.disk}`,
+			];
+			if (resources.pidsLimit !== undefined) resParts.push(`pids=${resources.pidsLimit}`);
+			const resStr = ` (${resParts.join(", ")})`;
 
+			const statusPrefix = isReattached ? "🔄 Reattached" : "🛡 Sandbox up";
 			ctx.ui.setStatus(
 				"sandbox",
-				ctx.ui.theme.fg("accent", `🛡  ${runtime.kind}:${actualName} (net=${allowNetwork ? "on" : "off"})`),
+				ctx.ui.theme.fg("accent", `${statusPrefix}: ${actualName} (net=${allowNetwork ? "on" : "off"})${resStr}`),
 			);
-			ctx.ui.notify(`Sandbox up: ${runtime.kind} ${actualName}\n${ok}${skillMounts.length ? `\nSkills mounted: ${skillMounts.map((m) => m.target).join(", ")}` : ""}`, "info");
+			ctx.ui.notify(
+				`${statusPrefix}: docker ${actualName}${resStr}${isReusable ? " [re-usable]" : ""}\n${ok}${skillMounts.length ? `\nSkills mounted: ${skillMounts.map((m) => m.target).join(", ")}` : ""}${cacheVolume ? `\nCache volume: ${cacheVolume} at /cache` : ""}`,
+				"info"
+			);
 		} catch (e) {
 			sandbox = null;
 			ctx.ui.notify(`Sandbox init failed: ${e instanceof Error ? e.message : String(e)}`, "error");
@@ -885,8 +992,16 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const info = (await execCapture(sbx, "id; uname -a; df -h /workspace | tail -1")).toString();
+			const resParts: string[] = [];
+			if (sbx.resources?.memory) resParts.push(`memory: ${sbx.resources.memory}`);
+			if (sbx.resources?.cpus) resParts.push(`cpus: ${sbx.resources.cpus}`);
+			if (sbx.resources?.disk) resParts.push(`disk: ${sbx.resources.disk}`);
+			if (sbx.resources?.swap !== undefined) resParts.push(`swap: ${sbx.resources.swap}`);
+			if (sbx.resources?.pidsLimit !== undefined) resParts.push(`pids-limit: ${sbx.resources.pidsLimit}`);
+			const resStr = resParts.length ? `\nresources: ${resParts.join(", ")}` : "";
+			const reusableStr = sbx.isReusable ? ` [re-usable${sbx.isReattached ? ", reattached" : ""}]` : "";
 			ctx.ui.notify(
-				`Sandbox: ${sbx.runtime.kind} container ${sbx.name}\nhost cwd: ${sbx.hostCwd}\n${info}`,
+				`Sandbox: ${sbx.runtime.kind} container ${sbx.name}${reusableStr}\nhost cwd: ${sbx.hostCwd}${resStr}\n${info}`,
 				"info",
 			);
 		},
