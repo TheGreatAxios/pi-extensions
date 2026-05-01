@@ -207,7 +207,7 @@ async function detectRuntime(ctx?: any): Promise<Runtime | null> {
 	// Test the runtime with a quick 3s smoke test
 	const testName = `pi-test-${randomSuffix()}`;
 	try {
-		const r = await spawnWithTimeout(runtime.bin, ["run", "-d", "--rm", "--name", testName, "debian:bookworm-slim", "sleep", "infinity"], 3000);
+		const r = await spawnWithTimeout(runtime.bin, ["run", "-d", "--rm", "--name", testName, "debian:13.4-slim", "sleep", "infinity"], 3000);
 		if (r.code === 0 && !r.timedOut) {
 			// Clean up test container
 			runtime.stop(testName);

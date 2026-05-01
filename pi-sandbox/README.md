@@ -81,7 +81,7 @@ After `/sandbox update`, restart pi. Existing containers keep using the old imag
 
 ## Image contents
 
-Debian bookworm slim with common agent tools:
+Debian 13.4 slim with common agent tools:
 
 - shell/core: `bash`, coreutils, `git`, `curl`, `jq`, `ripgrep`, `fd`, `bat`, `eza`, `yq`, `ast-grep`
 - runtimes: `bun`, `node`, `npm`, `uv`, Python 3.13

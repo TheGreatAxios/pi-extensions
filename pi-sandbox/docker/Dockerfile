@@ -10,7 +10,7 @@
 # Built with either:
 #   docker build -t pi-sandbox:latest -f docker/Dockerfile docker
 #   container build -t pi-sandbox:latest -f docker/Dockerfile docker
-FROM debian:bookworm-slim
+FROM debian:13.4-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG ARCH=aarch64
