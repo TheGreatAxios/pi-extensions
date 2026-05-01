@@ -22,9 +22,28 @@ pi -e ./index.ts  # sandbox enabled by default
 
 Use `--container-size <tier>` or set in `.pi/config.json`.
 
-## Re-usable Sandboxes
+## Container Naming & Lifecycle
 
-For large projects with complex setup (e.g., Warp), use named sandboxes to avoid repeated initialization:
+By default, each project gets a **deterministic** container name:
+```
+pi-sbx-<dirname>-<hash6>
+```
+For example, an agent in `/Users/me/my-project` creates `pi-sbx-my-project-a1b2c3`.
+This makes containers identifiable in `docker ps` without needing `--sandbox-name`.
+
+### Lifecycle (Default Mode)
+- **Start**: Container is created (or reused if it still exists from a crash).
+- **Exit (CTRL+C)**: Container is **stopped and removed** — no accumulation.
+- **Crash recovery**: If pi crashes, the container lingers. Next `pi` start in the same project **reattaches** automatically.
+
+### Persist Mode (`--sandbox-persist` or `.pi/config.json` `"persist": true`)
+- Container is **kept** after pi exits.
+- Next `pi` start in the same project finds and **reattaches** to the existing container.
+- Use this for large environments (e.g., Warp) where rebuild is expensive.
+
+### Re-usable Named Sandboxes (`--sandbox-name <name>`)
+
+For complex projects that need consistent state across sessions:
 
 ```bash
 # Create or reattach to a named sandbox
@@ -71,7 +90,10 @@ Create `.pi/config.json` in your project:
 Single-file extension (`index.ts`). Docker runtime with:
 - `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 512`
 - Size-based resource tiers (memory, swap, CPU, disk)
-- Named/re-usable containers with reattach support
+- **Deterministic per-project naming**: `pi-sbx-<dirname>-<hash6>`
+- **Auto-cleanup** on exit: containers are removed unless persist/keep flags are set
+- **Crash recovery**: stale containers are reattached on next start
+- Named/re-usable containers with explicit reattach support
 - Optional persistent cache volumes at `/cache`
 
 Four tool adapters (`readOps`, `writeOps`, `editOps`, `bashOps`) translate operations to `sh -c` commands inside the container. Only project cwd is bind-mounted to `/workspace`; host secrets, SSH keys, and home directory are never exposed.

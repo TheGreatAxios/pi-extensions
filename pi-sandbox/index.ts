@@ -55,7 +55,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
@@ -151,6 +151,8 @@ interface Runtime {
 	/** Returns the container name actually used (may differ from args.name on collision). */
 	run(args: RunArgs): Promise<string>;
 	stop(name: string): void;
+	/** Remove a container forcefully (docker rm -f). */
+	remove(name: string): void;
 	exists(image: string): Promise<boolean>;
 	/** Check if a container with the given name is running. */
 	isRunning(name: string): Promise<boolean>;
@@ -188,6 +190,17 @@ interface RunArgs {
 
 function randomSuffix(): string {
 	return randomBytes(4).toString("hex");
+}
+
+/**
+ * Derive a deterministic container name from the project directory.
+ * Format: pi-sbx-<dirname>-<hash6>
+ * This is unique per project and allows container reuse/recovery.
+ */
+function deriveContainerName(hostCwd: string): string {
+	const basename = hostCwd.split("/").filter(Boolean).pop() || "project";
+	const hash = createHash("sha256").update(hostCwd).digest("hex").slice(0, 6);
+	return `pi-sbx-${basename}-${hash}`;
 }
 
 function which(bin: string): boolean {
@@ -274,6 +287,9 @@ function dockerRuntime(): Runtime {
 		},
 		stop: (name) => {
 			spawnSync(bin, ["stop", name], { stdio: "ignore" });
+		},
+		remove: (name) => {
+			spawnSync(bin, ["rm", "-f", name], { stdio: "ignore" });
 		},
 		isRunning: async (name: string) => {
 			const r = await spawnWithTimeout(bin, ["inspect", "--format", "{{.State.Running}}", name], 5000);
@@ -1188,9 +1204,11 @@ export default function (pi: ExtensionAPI) {
 			const extraPathsRaw = pi.getFlag("container-mount-paths") as string | undefined;
 			const extraPaths = extraPathsRaw ? extraPathsRaw.split(",").map((p) => p.trim()).filter(Boolean) : undefined;
 
-			// Determine sandbox name
+			// Determine sandbox name:
+			//   --sandbox-name <name>  → use as-is (reusable)
+			//   default                → pi-sbx-<dirname>-<hash6> (deterministic, project-scoped)
 			const nameFlag = pi.getFlag("sandbox-name") as string | undefined;
-			const sandboxName = nameFlag || `pi-sbx-${randomSuffix()}`;
+			const sandboxName = nameFlag || deriveContainerName(localCwd);
 			const isReusable = !!nameFlag;
 
 			// Determine cache volume
@@ -1205,19 +1223,39 @@ export default function (pi: ExtensionAPI) {
 			// Discover skill directories on the host.
 			const skillMounts = mountSkills ? discoverSkillDirs(extraPaths) : [];
 
-			// Check if sandbox already exists and is running (re-usable sandbox)
+			// Check if a container with this name already exists:
+			//   - Running  → reattach (crash recovery, persist mode, or concurrent session)
+			//   - Stopped  → start if reusable/persist, otherwise remove for fresh slate
+			//   - Missing  → create new
 			let isReattached = false;
-			if (isReusable) {
+			{
 				const running = await runtime.isRunning(sandboxName);
 				if (running) {
 					isReattached = true;
-					ctx.ui.notify(`Reattaching to existing sandbox: ${sandboxName}`, "info");
+					ctx.ui.notify(`🔄 Reattaching to existing sandbox: ${sandboxName}`, "info");
 				} else {
-					// Try to start if it exists but is stopped
-					const started = await runtime.start(sandboxName);
-					if (started) {
-						isReattached = true;
-						ctx.ui.notify(`Restarted existing sandbox: ${sandboxName}`, "info");
+					// Check if container exists at all (stopped state)
+					const inspect = await spawnWithTimeout(
+						runtime.bin, ["inspect", "--format", "exists", sandboxName], 5000,
+					);
+					if (inspect.code === 0 && !inspect.timedOut) {
+						// Container exists but is not running
+						if (isReusable || persist) {
+							// Reusable or persist mode → start the stopped container
+							const started = await runtime.start(sandboxName);
+							if (started) {
+								isReattached = true;
+								ctx.ui.notify(`♻️ Restarted existing sandbox: ${sandboxName}`, "info");
+							} else {
+								// Start failed — remove it and create fresh
+								ctx.ui.notify(`Removing broken container ${sandboxName}, creating fresh...`, "warning");
+								runtime.remove(sandboxName);
+							}
+						} else {
+							// Non-reusable, non-persist → remove stale container for clean slate
+							ctx.ui.notify(`Cleaning up stale container ${sandboxName} for fresh sandbox`, "info");
+							runtime.remove(sandboxName);
+						}
 					}
 				}
 			}
@@ -1288,12 +1326,15 @@ export default function (pi: ExtensionAPI) {
 				isReattached,
 			};
 
-			// Cleanup handler - only stop if not keep/persist and not re-usable
+			// Cleanup handler — stop & remove container unless keep/persist is set
+			// In default (non-reusable) mode, the container is fully removed.
+			// In reusable/persist mode, the container is kept for future sessions.
 			const cleanup = () => {
 				const s = sandbox;
 				if (!s || s.keep) return;
 				try {
 					s.runtime.stop(s.name);
+					s.runtime.remove(s.name);
 				} catch {}
 				sandbox = null;
 			};
@@ -1379,7 +1420,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		const sbx = getSbx();
 		if (!sbx) return;
-		if (!sbx.keep) sbx.runtime.stop(sbx.name);
+		if (!sbx.keep) {
+			sbx.runtime.stop(sbx.name);
+			sbx.runtime.remove(sbx.name);
+		}
 		sandbox = null;
 	});
 
