@@ -1,7 +1,7 @@
 {
 	"name": "pi-thegreataxios-staples",
 	"version": "0.1.0",
-	"description": "Personal staple extensions for pi coding-agent — protected paths and plan mode",
+	"description": "Personal staple extension for pi coding-agent — protected paths",
 	"license": "MIT",
 	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
 	"repository": {
@@ -13,7 +13,6 @@
 		"pi-package",
 		"pi-extension",
 		"protected-paths",
-		"plan-mode",
 		"security",
 		"file-protection"
 	],

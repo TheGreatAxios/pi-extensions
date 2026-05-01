@@ -1,6 +1,6 @@
 {
   "name": "thegreataxios-staples",
-  "version": "1.0.0",
-  "description": "Personal staple extensions — protected paths and plan mode",
+  "version": "0.1.0",
+  "description": "Personal staple extension — protected paths",
   "entry": "index.ts"
 }

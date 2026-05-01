@@ -1,6 +1,6 @@
 # pi-thegreataxios-staples
 
-Personal staple extensions for [pi](https://pi.dev). Bundles protected paths and plan mode.
+Personal staple extension for [pi](https://pi.dev). Blocks writes/edits to sensitive files.
 
 ## Quick Start
 
@@ -12,21 +12,21 @@ pi -e ./index.ts
 
 ### Protected Paths
 
-Blocks `write`/`edit` to `.env`, `.git/`, `node_modules/` via `tool_call` hook.
+Blocks `write`/`edit` to sensitive files via `tool_call` hook:
 
-### Plan Mode
-
-Read-only exploration with `/plan`, `Ctrl+Alt+P`, or `--plan` flag. Bash allowlisted to read-only commands. Extracts numbered steps from `Plan:` sections, tracks `[DONE:n]` markers during execution, shows progress widget. State persists across session resume.
+| Path | Reason |
+|------|--------|
+| `.env` (exact file) | Secrets and environment variables |
+| `.env.*` (e.g. `.env.local`, `.env.production`) | Environment-specific secrets |
+| ~~`.env.example`~~ **allowed** | Template file, not secrets |
+| `.dev.vars` | Cloudflare Workers secrets |
+| `.git/` | Version control integrity |
+| `node_modules/` | Dependency tree stability |
 
 ## Architecture
 
 ```
-index.ts                          # Entry — activates both features
+index.ts                     # Entry — activates protected paths
 features/
-├── protected-paths.ts            # tool_call hook for write/edit blocking
-└── plan-mode/
-    ├── index.ts                  # Lifecycle: session_start, before_agent_start, turn_end, agent_end
-    └── utils.ts                  # isSafeCommand, extractTodoItems, markCompletedSteps
+└── protected-paths.ts       # tool_call hook with filename-aware blocking
 ```
-
-Commands: `/plan`, `/todos`. Shortcut: `Ctrl+Alt+P`. Flag: `--plan`.

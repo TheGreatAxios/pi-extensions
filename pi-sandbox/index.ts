@@ -56,7 +56,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import {
@@ -67,6 +67,8 @@ import {
 	createWriteTool,
 	type EditOperations,
 	type ExtensionAPI,
+	type ExtensionUIContext,
+	getAgentDir,
 	type ReadOperations,
 	type WriteOperations,
 } from "@mariozechner/pi-coding-agent";
@@ -363,7 +365,162 @@ interface Sandbox {
 }
 
 let sandbox: Sandbox | null = null;
+let pathApprovals: PathApprovalStore | null = null;
 const getSbx = () => sandbox;
+
+// ---------------------------------------------------------------------------
+// External path approval store (persisted across sessions)
+// ---------------------------------------------------------------------------
+
+interface PathApprovalRecord {
+	path: string;
+	approvedAt: number;
+	expiresAt: number; // Infinity = forever
+}
+
+class PathApprovalStore {
+	private path: string;
+	private records: Map<string, PathApprovalRecord> = new Map();
+
+	constructor(agentDir: string) {
+		this.path = resolvePath(agentDir, "path-approvals.json");
+		this.load();
+	}
+
+	private load(): void {
+		if (!existsSync(this.path)) return;
+		try {
+			const raw = JSON.parse(readFileSync(this.path, "utf-8")) as PathApprovalRecord[];
+			const now = Date.now();
+			for (const r of raw) {
+				if (r.expiresAt === Infinity || r.expiresAt > now) {
+					this.records.set(r.path, r);
+				}
+			}
+		} catch {
+			// corrupt file — start fresh
+		}
+	}
+
+	private save(): void {
+		const dir = this.path.slice(0, this.path.lastIndexOf("/"));
+		if (!existsSync(dir)) {
+			try { mkdirSync(dir, { recursive: true }); } catch {}
+		}
+		const tmpPath = this.path + ".tmp";
+		const data = Array.from(this.records.values());
+		writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+		renameSync(tmpPath, this.path);
+	}
+
+	/** Check if a path (or any parent prefix) is approved. Returns the matching record or undefined. */
+	find(absPath: string): PathApprovalRecord | undefined {
+		// Exact match
+		const exact = this.records.get(absPath);
+		if (exact && (exact.expiresAt === Infinity || exact.expiresAt > Date.now())) return exact;
+
+		// Prefix match (e.g. approved /foo/bar matches /foo/bar/baz.txt)
+		for (const [, record] of this.records) {
+			if (
+				(absPath === record.path || absPath.startsWith(record.path + "/")) &&
+				(record.expiresAt === Infinity || record.expiresAt > Date.now())
+			) {
+				return record;
+			}
+		}
+
+		return undefined;
+	}
+
+	add(absPath: string, days: number | typeof Infinity): void {
+		const now = Date.now();
+		const record: PathApprovalRecord = {
+			path: absPath,
+			approvedAt: now,
+			expiresAt: days === Infinity ? Infinity : now + days * 24 * 60 * 60 * 1000,
+		};
+		this.records.set(absPath, record);
+		this.save();
+	}
+
+	revoke(absPath: string): boolean {
+		if (this.records.delete(absPath)) {
+			this.save();
+			return true;
+		}
+		return false;
+	}
+
+	list(): PathApprovalRecord[] {
+		return Array.from(this.records.values()).filter(
+			(r) => r.expiresAt === Infinity || r.expiresAt > Date.now(),
+		);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Interactive approval flow for external paths
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if a host path needs approval and request it interactively.
+ * Returns true if approved (path is added to the session allowlist), false if denied.
+ */
+async function requestPathApproval(
+	absPath: string,
+	sessionPrefixes: string[],
+	store: PathApprovalStore,
+	ui: ExtensionUIContext,
+): Promise<boolean> {
+	// 1. Check session-level prefixes (--container-allow-paths, /sandbox-allow)
+	for (const prefix of sessionPrefixes) {
+		if (absPath === prefix || absPath.startsWith(prefix + "/")) return true;
+	}
+
+	// 2. Check persisted approvals
+	const existing = store.find(absPath);
+	if (existing) return true;
+
+	// 3. Default: pi clipboard files (auto-approved)
+	const basename = absPath.split("/").pop() || "";
+	if (basename.startsWith("pi-clipboard-")) return true;
+
+	// 4. Interactive approval
+	const options = [
+		`Approve once`,
+		`Approve always`,
+		`Approve for 7 days`,
+		`Approve for 30 days`,
+		`Deny`,
+	];
+
+	const choice = await ui.select(
+		`Sandbox: External File Access`,
+		options,
+	);
+
+	if (!choice || choice.includes("Deny")) return false;
+
+	if (choice.includes("once")) {
+		// Session-only, not persisted — add to session prefixes
+		sessionPrefixes.push(absPath);
+		return true;
+	}
+
+	if (choice.includes("always")) {
+		store.add(absPath, Infinity);
+		sessionPrefixes.push(absPath);
+		ui.notify(`Approved read access (always): ${absPath}`, "info");
+		return true;
+	}
+
+	const days = choice.includes("30") ? 30 : 7;
+	store.add(absPath, days);
+	sessionPrefixes.push(absPath);
+	ui.notify(`Approved read access (${days} days): ${absPath}`, "info");
+	return true;
+}
+
 
 // ---------------------------------------------------------------------------
 // Path translation + safety
@@ -569,6 +726,36 @@ function readOps(sbx: Sandbox): ReadOperations {
 	};
 }
 
+/**
+ * Check whether a host path is external to the sandbox cwd and needs approval.
+ * Returns the absolute external path, or null if the path is inside cwd or a known mount.
+ */
+function getExternalPath(hostPath: string, hostCwd: string, mounts: MountSpec[]): string | null {
+	if (isInsideCwd(hostPath, hostCwd)) return null;
+	const abs = resolvePath(hostCwd, hostPath);
+	// Already covered by an extra mount (e.g. /skills)
+	const containerPath = hostPath.startsWith("/") ? hostPath : abs;
+	if (resolveExtraMountPath(containerPath, mounts)) return null;
+	return abs;
+}
+
+/**
+ * Ensure an external path is approved for read access.
+ * Checks session allowlist, persisted store, then prompts interactively.
+ * Throws if denied. On approval, adds path to session allowlist so readOps can use it.
+ */
+async function ensureExternalReadApproved(
+	absPath: string,
+	sbx: Sandbox,
+	store: PathApprovalStore,
+	ui: ExtensionUIContext,
+): Promise<void> {
+	const approved = await requestPathApproval(absPath, sbx.allowedExternalPrefixes, store, ui);
+	if (!approved) {
+		throw new Error(`sandbox: access denied to ${absPath}`);
+	}
+}
+
 function writeOps(sbx: Sandbox): WriteOperations {
 	return {
 		writeFile: async (p, content) => {
@@ -764,11 +951,38 @@ export default function (pi: ExtensionAPI) {
 	const localEdit = createEditTool(localCwd);
 	const localBash = createBashTool(localCwd);
 
+	// Initialize the persistent path approval store
+	pathApprovals = new PathApprovalStore(getAgentDir());
+
+	/**
+	 * Shared guard for read tools: if the path is external, check approvals
+	 * and prompt interactively before delegating to sandbox readOps.
+	 */
+	async function guardExternalRead(
+		paramsPath: string,
+		sbx: Sandbox,
+		ctx: { ui: ExtensionUIContext; hasUI: boolean },
+	): Promise<void> {
+		const external = getExternalPath(paramsPath, sbx.hostCwd, sbx.mounts);
+		if (!external) return;
+		// Already in session allowlist?
+		if (isAllowedExternalResource(external, sbx.allowedExternalPrefixes)) return;
+		// Need UI for interactive prompt
+		if (!ctx.hasUI) {
+			throw new Error(
+				`sandbox: refusing to access ${external}: outside of project cwd ${sbx.hostCwd}. ` +
+				`Use --container-allow-paths or /sandbox-allow to grant access.`,
+			);
+		}
+		await ensureExternalReadApproved(external, sbx, pathApprovals!, ctx.ui);
+	}
+
 	pi.registerTool({
 		...localRead,
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const sbx = getSbx();
 			if (!sbx) return localRead.execute(id, params, signal, onUpdate);
+			await guardExternalRead(params.path, sbx, _ctx);
 			const tool = createReadTool(localCwd, { operations: readOps(sbx) });
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -1055,6 +1269,49 @@ export default function (pi: ExtensionAPI) {
 			}
 			sbx.allowedExternalPrefixes.push(abs);
 			ctx.ui.notify(`Sandbox: read access now allowed for ${abs}`, "info");
+		},
+	});
+
+	pi.registerCommand("sandbox-paths", {
+		description: "List or revoke persisted external path approvals",
+		handler: async (args, ctx) => {
+			const store = pathApprovals;
+			if (!store) {
+				ctx.ui.notify("Path approval store not initialized.", "info");
+				return;
+			}
+			const parts = args.trim().split(/\s+/);
+			const sub = parts[0];
+
+			if (sub === "revoke" && parts[1]) {
+				const target = parts.slice(1).join(" ");
+				const abs = target.startsWith("~") ? resolvePath(homedir(), target.slice(1)) : resolvePath(target);
+				if (store.revoke(abs)) {
+					ctx.ui.notify(`Revoked path approval: ${abs}`, "info");
+				} else {
+					ctx.ui.notify(`No approval found for: ${abs}`, "warning");
+				}
+				return;
+			}
+
+			const records = store.list();
+			if (records.length === 0) {
+				ctx.ui.notify("No persisted path approvals. External reads will prompt interactively.", "info");
+				return;
+			}
+			const lines = records.map((r) => {
+				const expiry = r.expiresAt === Infinity ? "always" : `expires ${new Date(r.expiresAt).toISOString()}`;
+				return `  ${r.path} (${expiry})`;
+			});
+			ctx.ui.notify(
+				[
+					`Persisted path approvals (${records.length}):`,
+					...lines,
+					"",
+					"Use /sandbox-paths revoke <path> to revoke an approval.",
+				].join("\n"),
+				"info",
+			);
 		},
 	});
 }

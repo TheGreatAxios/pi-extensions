@@ -76,4 +76,23 @@ Single-file extension (`index.ts`). Docker runtime with:
 
 Four tool adapters (`readOps`, `writeOps`, `editOps`, `bashOps`) translate operations to `sh -c` commands inside the container. Only project cwd is bind-mounted to `/workspace`; host secrets, SSH keys, and home directory are never exposed.
 
+### External Path Access
+
+When the agent tries to read a file outside the project cwd, the sandbox prompts with an interactive approval flow:
+
+1. **Approve once** — session-only, not persisted
+2. **Approve always** — persisted indefinitely (until revoked)
+3. **Approve for 7 days** — persisted with 7-day expiry
+4. **Approve for 30 days** — persisted with 30-day expiry
+5. **Deny** — blocked
+
+Approvals are stored in `~/.pi/agent/path-approvals.json` and support prefix matching (approving a directory grants access to all files under it).
+
+Commands:
+- `/sandbox-allow <path>` — grant session-only access without prompting
+- `/sandbox-paths` — list persisted path approvals
+- `/sandbox-paths revoke <path>` — revoke a persisted approval
+
+Non-interactive mode (no UI): external reads are blocked unless pre-approved via `--container-allow-paths` or `/sandbox-allow`.
+
 > **⚠️ Dockerfile changes require rebuild.** Run `bun run build` after modifying `docker/Dockerfile`. Changes to `index.ts` take effect immediately.

@@ -30,8 +30,6 @@ RUN apt-get update \
         jq \
         less \
         make \
-        nodejs \
-        npm \
         python3 \
         python3-venv \
         ripgrep \
@@ -195,6 +193,18 @@ RUN dl-verify \
 
 # Install prawl globally
 RUN bun install -g @thegreataxios/prawl
+
+# ── Node.js v25 (replaces Debian package that ships v18) ────────────────
+ARG NODE_VERSION=25.9.0
+ARG NODE_ARCH=arm64
+ARG NODE_SHA256=bf007bf0dcc2fddd90888fde374a1ad33c1ab2ca2ad324c645dd7aed0f9f1460
+RUN dl-verify \
+      https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz \
+      ${NODE_SHA256} \
+      /tmp/node.tar.xz \
+ && tar xf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
+ && ln -sf /usr/local/bin/node /usr/local/bin/nodejs \
+ && rm -f /tmp/node.tar.xz
 
 # Remove the build helper — no longer needed, reduces attack surface
 RUN rm -f /usr/local/bin/dl-verify
