@@ -1,6 +1,6 @@
 {
 	"name": "pi-container-sandbox",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "pi coding-agent extension that runs every read/write/edit/bash op inside a per-session Linux container (Apple `container` or Docker).",
 	"license": "MIT",
 	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
