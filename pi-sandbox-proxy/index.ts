@@ -36,6 +36,15 @@ import { detectPromptInjection } from "./src/detection/prompt-injection";
 import { AuditLog } from "./src/util/log";
 import { DomainWhitelist } from "./src/proxy/whitelist";
 
+/** Promise race with a timeout — rejects if the promise takes longer than ms */
+function timeoutPromise<T>(promise: Promise<T>, ms: number, message?: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new Error(message ?? "Timed out")), ms);
+	});
+	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 const SECURITY_APPENDIX = `
 
 ## Security Proxy Active
@@ -69,6 +78,7 @@ export default function (pi: ExtensionAPI) {
 
 	let pendingApprovals = 0;
 	const MAX_PENDING_APPROVALS = 20;
+	const APPROVAL_TIMEOUT_MS = 120_000; // 2 minutes max per approval dialog
 
 	// --- Flags ---
 
@@ -156,7 +166,11 @@ export default function (pi: ExtensionAPI) {
 		pendingApprovals++;
 		let result: PipelineResult;
 		try {
-			result = await pipeline.check(parsed, ctx.ui);
+			result = await timeoutPromise(
+				pipeline.check(parsed, ctx.ui),
+				APPROVAL_TIMEOUT_MS,
+				"Approval dialog timed out (2 min)",
+			);
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
 			auditLog.log({ action: "blocked", subject: parsed.raw, reason });
@@ -307,6 +321,15 @@ export default function (pi: ExtensionAPI) {
 			}
 			store.revoke(subject);
 			ctx.ui.notify(`Revoked approval for "${subject}"`, "info");
+		},
+	});
+
+	pi.registerCommand("proxy-flush", {
+		description: "Reset the pending approval counter (use if approvals appear stuck)",
+		handler: async (_args, ctx) => {
+			const before = pendingApprovals;
+			pendingApprovals = 0;
+			ctx.ui.notify(`Reset pending approval counter from ${before} to 0`, "info");
 		},
 	});
 
