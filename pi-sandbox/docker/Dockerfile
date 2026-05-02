@@ -125,9 +125,9 @@ RUN dl-verify \
 
 # ── Python 3.13.9 via uv ──────────────────────────────────────────
 # Replace apt python3 with a uv-managed Python 3.13.9.
-# UV_PYTHON_DIR is set to /opt/uv-python so the installation is
+# UV_PYTHON_INSTALL_DIR is set to /opt/uv-python so the installation is
 # accessible to all users (not just root).
-ENV UV_PYTHON_DIR=/opt/uv-python
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 RUN uv python install 3.13.9 \
  && PYTHON_BIN=$(uv python find 3.13.9) \
  && ln -sf "$PYTHON_BIN" /usr/local/bin/python3 \
