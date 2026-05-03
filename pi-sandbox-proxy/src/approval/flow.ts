@@ -79,8 +79,12 @@ export async function requestApproval(
 
 	// Build options based on whether this is URL-based (eligible for domain wildcard)
 	const options: string[] = [];
+
+	// Use once first — quickest path
+	options.push(`Use once`);
+
 	if (isUrlBased && domains.length > 0) {
-		const domainLabel = domains.length === 1 ? domains[0] : `${domains.length} domains`;
+		const domainLabel = domains.join(", ");
 		options.push(
 			`Approve URL for 30 days`,
 			`Approve URL for 7 days`,
@@ -93,7 +97,6 @@ export async function requestApproval(
 			`Approve for 7 days`,
 		);
 	}
-	options.push(`Use once`);
 	options.push(`Deny`);
 
 	let choice: string | undefined;

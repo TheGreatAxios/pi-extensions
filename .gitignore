@@ -381,3 +381,5 @@ rustc-ice-*.txt
 *.sublime-workspace
 *.code-workspace
 .pi/agent/sandbox.json
+.pi/agent/sandbox.json
+**/.pi/agent/sandbox.json
