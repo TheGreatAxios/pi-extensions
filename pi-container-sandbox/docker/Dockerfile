@@ -8,8 +8,8 @@
 #   - every downloaded binary is SHA256-verified at build time
 #
 # Built with either:
-#   docker build -t pi-sandbox:latest -f docker/Dockerfile docker
-#   container build -t pi-sandbox:latest -f docker/Dockerfile docker
+#   docker build -t pi-container-sandbox:latest -f docker/Dockerfile docker
+#   container build -t pi-container-sandbox:latest -f docker/Dockerfile docker
 FROM debian:13.4-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -172,14 +172,14 @@ RUN printf '#!/bin/sh\nexec uv pip "$@"\n' > /usr/local/bin/pip \
 
 # ── Bash aliases (for interactive use only — `!` commands) ──────────
 RUN cat >> /etc/bash.bashrc << 'BASHRC'
-# Modern tool aliases for pi-sandbox (interactive bash only)
+# Modern tool aliases for pi-container-sandbox (interactive bash only)
 alias ll='eza --icons -l --git'
 alias la='eza --icons -la --git'
 alias lt='eza --icons --tree --level=3'
 BASHRC
 
 RUN cat > /etc/profile.d/sandbox-aliases.sh << 'PROFILE'
-# Modern tool aliases for pi-sandbox (login shells)
+# Modern tool aliases for pi-container-sandbox (login shells)
 alias ll='eza --icons -l --git'
 alias la='eza --icons -la --git'
 alias lt='eza --icons --tree --level=3'

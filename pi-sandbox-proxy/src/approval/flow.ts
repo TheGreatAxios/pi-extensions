@@ -1,4 +1,4 @@
-import type { ExtensionUIContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { ParsedCommand } from "../parsers/types";
 import type { ApprovalStore, ApprovalScope } from "./store";
 import type { ProxyConfig } from "../config/types";

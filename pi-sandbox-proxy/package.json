@@ -33,7 +33,7 @@
 		]
 	},
 	"dependencies": {
-		"@mariozechner/pi-coding-agent": "^0.70.5"
+		"@earendil-works/pi-coding-agent": "^0.74.0"
 	},
 	"devDependencies": {
 		"@types/node": "^25.6.0",

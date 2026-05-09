@@ -16,9 +16,8 @@ These extensions augment pi with security-first, composable capabilities:
 ```
 pi-extensions/
 ├── pi-multi-provider-manager/  # Multi-account providers (ChatGPT, Fireworks, Z.ai)
-├── pi-sandbox/         # Container isolation for all agent operations
+├── pi-container-sandbox/         # Container isolation for all agent operations
 ├── pi-sandbox-proxy/   # Security proxy with approval flows and vuln scanning
-├── pi-tavily-search/   # AI-powered web search using Tavily API
 ├── pi-thegreataxios-staples/ # Personal staples: protected paths + plan mode
 └── AGENTS.md           # This file
 ```
@@ -28,7 +27,7 @@ pi-extensions/
 ### TypeScript
 - Strict mode, ES2022, ESNext modules, Bundler resolution
 - ESM imports only (`import ... from`); no `.js` extensions (Bun resolves natively)
-- Single runtime dependency: `@mariozechner/pi-coding-agent`
+- Single runtime dependency: `@earendil-works/pi-coding-agent`
 - Use `bun` for everything: `bun install`, `bunx tsc`, `bun run`
 
 ### Tool Interception
@@ -50,9 +49,8 @@ All paths translated to container-relative (`/workspace/<relative>`). Operations
 | Package | One-liner | Location |
 |---------|-----------|----------|
 | **pi-multi-provider-manager** | Multi-account provider extension for ChatGPT/Codex, Fireworks AI, and Z.ai | [`pi-multi-provider-manager/`](./pi-multi-provider-manager/) |
-| **pi-sandbox** | Runs every agent operation inside an isolated Linux container | [`pi-sandbox/`](./pi-sandbox/) |
+| **pi-container-sandbox** | Runs every agent operation inside an isolated Linux container | [`pi-container-sandbox/`](./pi-container-sandbox/) |
 | **pi-sandbox-proxy** | Security proxy with approval flows, vulnerability scanning, and supply chain enforcement | [`pi-sandbox-proxy/`](./pi-sandbox-proxy/) |
 | **pi-thegreataxios-staples** | Personal staples: protected paths (blocks write/edit to .env, .git, node_modules) + plan mode (read-only exploration with step tracking) | [`pi-thegreataxios-staples/`](./pi-thegreataxios-staples/) |
-| **pi-tavily-search** | AI-powered web search using Tavily API | [`pi-tavily-search/`](./pi-tavily-search/) |
 
 See each package's `AGENTS.md` for detailed architecture, commands, and quick start.

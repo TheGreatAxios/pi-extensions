@@ -1,20 +1,21 @@
 {
-	"name": "pi-thegreataxios-staples",
-	"version": "0.1.1",
-	"description": "Personal staple extension for pi coding-agent — protected paths",
+	"name": "pi-protected-paths",
+	"version": "0.1.0",
+	"description": "Blocks write/edit to sensitive files (.env, .git, node_modules, SSH keys, credentials, and more)",
 	"license": "MIT",
 	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/thegreataxios/pi-extensions.git",
-		"directory": "pi-thegreataxios-staples"
+		"directory": "pi-protected-paths"
 	},
 	"keywords": [
 		"pi-package",
 		"pi-extension",
 		"protected-paths",
 		"security",
-		"file-protection"
+		"file-protection",
+		"sensitive-files"
 	],
 	"type": "module",
 	"main": "index.ts",
@@ -35,7 +36,7 @@
 		]
 	},
 	"dependencies": {
-		"@mariozechner/pi-coding-agent": "^0.70.6"
+		"@earendil-works/pi-coding-agent": "^0.74.0"
 	},
 	"devDependencies": {
 		"@types/node": "^25.6.0",

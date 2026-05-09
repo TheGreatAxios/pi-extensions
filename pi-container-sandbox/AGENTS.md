@@ -1,11 +1,11 @@
-# pi-sandbox
+# pi-container-sandbox
 
 Container isolation extension for [pi](https://pi.dev). Intercepts every `read`, `write`, `edit`, and `bash` operation and runs it inside an isolated Linux container (Docker).
 
 ## Quick Start
 
 ```bash
-cd pi-sandbox && bun install && bun run build
+cd pi-container-sandbox && bun install && bun run build
 pi -e ./index.ts  # sandbox enabled by default
 ```
 
@@ -116,7 +116,8 @@ Commands:
 - `/sandbox paths` — list persisted path approvals
 - `/sandbox paths revoke <path>` — revoke a persisted approval
 - `/sandbox doctor` — verify core tools inside the container (node, bun, python, uv, chromium, etc.)
-- `/sandbox update` — pull the latest sandbox image from Docker Hub
+- `/sandbox install` — pull the sandbox image (works without a running container)
+- `/sandbox update` — pull the latest sandbox image (requires active container)
 - `/sandbox config` — show current `.pi/agent/sandbox.json` config
 - `/sandbox pin <tag>` — pin project to a specific image tag (e.g. `v1.0.0`)
 - `/sandbox unpin` — unpin and follow `latest` again
@@ -145,7 +146,7 @@ Or via commands:
 
 ### Automatic Version Checking
 
-On session start, pi-sandbox checks Docker Hub once per day for a new image digest.
+On session start, pi-container-sandbox checks Docker Hub once per day for a new image digest.
 If a newer version of the configured tag is found, it notifies you:
 
 > 📦 New sandbox image available: thegreataxios/pi-sandbox:latest
@@ -158,3 +159,17 @@ Version checking is skipped when:
 - Network is unavailable
 
 > **⚠️ Dockerfile changes require rebuild.** Run `bun run build` after modifying `docker/Dockerfile`. Changes to `index.ts` take effect immediately.
+
+## Combining with pi-sandbox-proxy
+
+Use pi-container-sandbox alongside [pi-sandbox-proxy](../pi-sandbox-proxy/) for defense-in-depth:
+- **Sandbox** isolates filesystem operations (containers, no host access)
+- **Proxy** gates all network operations (vuln scanning, approval flows, typosquatting)
+
+```bash
+pi -e ./index.ts -e ../pi-sandbox-proxy/index.ts
+```
+
+The proxy auto-detects whether the sandbox is active and what its network mode is.
+If the sandbox has network disabled (`--no-container-net`), the proxy short-circuits
+without prompting for approvals — a container with no network stack can't reach the internet.

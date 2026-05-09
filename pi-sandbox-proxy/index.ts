@@ -17,16 +17,16 @@
  *
  * Post-execution: scans tool results for prompt injection attempts.
  *
- * Works standalone (host-level auditing) or alongside pi-sandbox (container-aware).
+ * Works standalone (host-level auditing) or alongside pi-container-sandbox (container-aware).
  */
 
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
 	ExtensionAPI,
 	BashToolCallEvent,
 	ToolResultEvent,
-} from "@mariozechner/pi-coding-agent";
-import { isBashToolResult } from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
+import { isBashToolResult } from "@earendil-works/pi-coding-agent";
 
 import { loadConfig } from "./src/config/loader";
 import { parseCommand } from "./src/parsers/index";

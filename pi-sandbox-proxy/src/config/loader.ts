@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG } from "./defaults";
 import type { ProxyConfig } from "./types";
 

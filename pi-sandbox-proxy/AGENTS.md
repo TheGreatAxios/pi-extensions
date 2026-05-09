@@ -6,9 +6,19 @@ Security proxy extension for [pi](https://pi.dev). Intercepts every bash command
 
 ```bash
 cd pi-sandbox-proxy && bun install
-# With sandbox:  pi -e ../pi-sandbox/index.ts -e ./index.ts
+# With sandbox:  pi -e ../pi-container-sandbox/index.ts -e ./index.ts
 # Standalone:    pi -e ./index.ts
 ```
+
+## Combining with pi-container-sandbox
+
+Use this alongside [pi-container-sandbox](../pi-container-sandbox/) for defense-in-depth:
+- **Sandbox** isolates filesystem operations (containers, no host access)
+- **Proxy** gates all network operations (vuln scanning, approval flows, typosquatting)
+
+The proxy auto-detects whether the sandbox is loaded and what its network mode is.
+If the sandbox has network disabled (`--no-container-net`), the proxy short-circuits
+without prompting for approvals since the container has no network stack.
 
 ## Commands
 

@@ -71,7 +71,7 @@ import {
 	getAgentDir,
 	type ReadOperations,
 	type WriteOperations,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
 // Size tier configuration
@@ -1533,6 +1533,71 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	async function cmdSandboxInstall(_subArgs: string, ctx: { ui: ExtensionUIContext }) {
+		const hostCwd = localCwd;
+		const cfg = loadSandboxProjectConfig(hostCwd);
+		const imageRef = imageRefForTag(cfg.image, cfg.tag);
+
+		// Detect runtime (Docker) — works without an active sandbox container
+		const runtime = dockerRuntime();
+
+		// 1. Check if image already exists locally
+		const localDigest = await inspectLocalImageDigest(runtime, imageRef);
+		if (localDigest) {
+			ctx.ui.notify(
+				`✅ Already installed: ${imageRef}\n` +
+				`   Digest: ${localDigest.slice(0, 19)}...\n` +
+				`   Run \`pi -e ./index.ts\` to start the sandbox.`,
+				"info",
+			);
+			return;
+		}
+
+		// 2. Pull the image
+		ctx.ui.notify(`⬇ Installing sandbox image: ${imageRef}...`);
+		const pull = await spawnWithTimeout(runtime.bin, ["pull", imageRef], 180000);
+		if (pull.code !== 0 || pull.timedOut) {
+			ctx.ui.notify(
+				`❌ Failed to pull ${imageRef}.\n` +
+				`   Check Docker connectivity or build manually:\n` +
+				`   docker build -t ${imageRef} -f docker/Dockerfile docker`,
+				"error",
+			);
+			return;
+		}
+
+		// 3. Record the digest
+		const tagInfo = await fetchTagDigest(cfg.image, cfg.tag);
+		if (tagInfo?.digest) {
+			cfg.lastDigest = tagInfo.digest;
+		}
+		cfg.lastCheckedAt = Date.now();
+		saveSandboxProjectConfig(hostCwd, cfg);
+
+		// 4. Quick smoke test — run a throwaway container to verify the image works
+		const testName = `pi-install-test-${randomSuffix()}`;
+		const smoke = await spawnWithTimeout(
+			runtime.bin,
+			["run", "--rm", "--name", testName, imageRef, "sh", "-c", "id -un && pwd"],
+			15000,
+		);
+		if (smoke.code === 0 && !smoke.timedOut) {
+			ctx.ui.notify(
+				`✅ Installed: ${imageRef}\n` +
+				`   Digest: ${tagInfo?.digest?.slice(0, 19) ?? "unknown"}...\n` +
+				`   Smoke test: ${smoke.stdout.trim()}\n` +
+				`   Run \`pi -e ./index.ts\` to start using the sandbox.`,
+				"info",
+			);
+		} else {
+			ctx.ui.notify(
+				`⚠ Installed ${imageRef} but smoke test failed.\n` +
+				`   The image may be incomplete. Try /sandbox update or build manually.`,
+				"warning",
+			);
+		}
+	}
+
 	async function cmdSandboxUpdate(_subArgs: string, ctx: { ui: ExtensionUIContext }) {
 		const sbx = getSbx();
 		if (!sbx) {
@@ -1607,7 +1672,8 @@ export default function (pi: ExtensionAPI) {
 			`  /sandbox allow <path>  Grant session read access to a host path`,
 			`  /sandbox paths [revoke <path>]  List/revoke path approvals`,
 			`  /sandbox doctor       Check core tools inside the container`,
-			`  /sandbox update        Pull the latest image`,
+			`  /sandbox install      Pull sandbox image (no running container needed)`,
+			`  /sandbox update       Pull the latest image (requires active sandbox)`,
 			`  /sandbox pin <tag>     Pin to a specific version tag (e.g. v1.0.0)`,
 			`  /sandbox unpin         Unpin and follow the default tag again`,
 		];
@@ -1659,7 +1725,7 @@ export default function (pi: ExtensionAPI) {
 	// ── Main /sandbox command with subcommands ────────────────────────────
 
 	pi.registerCommand("sandbox", {
-		description: "Sandbox management. Subcommands: status, doctor, allow, paths, update, config, pin, unpin",
+		description: "Sandbox management. Subcommands: status, doctor, allow, paths, install, update, config, pin, unpin",
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0]?.toLowerCase() || "status";
@@ -1679,6 +1745,9 @@ export default function (pi: ExtensionAPI) {
 					}
 					return cmdSandboxPathsList(ctx);
 				}
+				case "install":
+				case "setup":
+					return cmdSandboxInstall(parts.slice(1).join(" "), ctx);
 				case "update":
 				case "upgrade":
 					return cmdSandboxUpdate(parts.slice(1).join(" "), ctx);
@@ -1692,7 +1761,7 @@ export default function (pi: ExtensionAPI) {
 				default:
 					ctx.ui.notify(
 						`Unknown subcommand: ${sub}\n` +
-						`Available: status, doctor, allow, paths [revoke], update, config, pin, unpin`,
+						`Available: status, doctor, allow, paths [revoke], install, update, config, pin, unpin`,
 						"info",
 					);
 			}

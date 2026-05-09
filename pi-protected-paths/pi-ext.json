@@ -1,0 +1,6 @@
+{
+  "name": "pi-protected-paths",
+  "version": "0.1.0",
+  "description": "Blocks write/edit to sensitive files — .env, .git, node_modules, SSH keys, credentials, and more",
+  "entry": "index.ts"
+}

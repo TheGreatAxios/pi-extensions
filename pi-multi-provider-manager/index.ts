@@ -12,9 +12,9 @@
  *   /login  → pick "Codex: <label>", "Fireworks: <label>", or "Z.ai: <label>"
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai";
-import { getModels } from "@mariozechner/pi-ai";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import { getModels } from "@earendil-works/pi-ai";
 
 // Get Codex models from the built-in provider
 const CODEX_MODELS = getModels("openai-codex");
@@ -107,7 +107,7 @@ async function withLoginTimeout(
 	label: string,
 	callbacks: OAuthLoginCallbacks,
 ): Promise<AccountCredentials> {
-	const { loginOpenAICodex } = require("@mariozechner/pi-ai/oauth");
+	const { loginOpenAICodex } = require("@earendil-works/pi-ai/oauth");
 	
 	const abortController = new AbortController();
 	const timeoutMs = 30 * 1000; // 30 second timeout
@@ -137,7 +137,7 @@ async function withLoginTimeout(
 }
 
 async function chatgptRefreshToken(credentials: AccountCredentials): Promise<AccountCredentials> {
-	const { refreshOpenAICodexToken } = require("@mariozechner/pi-ai/oauth");
+	const { refreshOpenAICodexToken } = require("@earendil-works/pi-ai/oauth");
 	const creds = await refreshOpenAICodexToken(credentials.refresh);
 	return { ...creds, accountLabel: credentials.accountLabel, kind: "codex" };
 }
@@ -543,7 +543,7 @@ export default function accountsExtension(pi: ExtensionAPI) {
 		const account = accounts[index];
 		const kind = accountKind(account);
 
-		const { AuthStorage } = require("@mariozechner/pi-coding-agent");
+		const { AuthStorage } = require("@earendil-works/pi-coding-agent");
 		const authStorage = AuthStorage.create();
 		authStorage.remove(getProviderId(account));
 		ctx.ui.notify(`✅ Cleared credentials for "${account.label}". Run /login and select "${account.label}" to re-authenticate.`, "info");
@@ -621,7 +621,7 @@ export default function accountsExtension(pi: ExtensionAPI) {
 		if (!account) { ctx.ui.notify(`${displayKind(kind)} "${label}" not found.`, "warning"); return; }
 		if (account.apiKeyEnv) { ctx.ui.notify(`${displayKind(kind)} "${label}" uses $${account.apiKeyEnv}; update the env var and restart pi.`, "info"); return; }
 
-		const { AuthStorage } = require("@mariozechner/pi-coding-agent");
+		const { AuthStorage } = require("@earendil-works/pi-coding-agent");
 		const authStorage = AuthStorage.create();
 		authStorage.remove(getProviderId(account));
 		ctx.ui.notify(`Cleared credentials. Run /login and select "${account.label}" to re-authenticate.`, "info");

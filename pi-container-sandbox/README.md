@@ -1,4 +1,4 @@
-# pi-sandbox
+# pi-container-sandbox
 
 Personal pi extension that runs `read`, `write`, `edit`, `bash`, and `user_bash` inside a Docker sandbox.
 
@@ -12,7 +12,7 @@ Personal pi extension that runs `read`, `write`, `edit`, `bash`, and `user_bash`
 ## Quick start
 
 ```bash
-cd pi-sandbox
+cd pi-container-sandbox
 bun install
 bun run build
 pi -e ./index.ts
