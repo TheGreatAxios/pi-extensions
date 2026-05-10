@@ -18,7 +18,7 @@ pi-extensions/
 ├── pi-multi-provider-manager/  # Multi-account providers (ChatGPT, Fireworks, Z.ai)
 ├── pi-container-sandbox/         # Container isolation for all agent operations
 ├── pi-sandbox-proxy/   # Security proxy with approval flows and vuln scanning
-├── pi-thegreataxios-staples/ # Personal staples: protected paths + plan mode
+├── pi-protected-paths/      # Blocks write/edit/read to .env, .git, node_modules, SSH keys, credentials
 └── AGENTS.md           # This file
 ```
 
@@ -51,6 +51,6 @@ All paths translated to container-relative (`/workspace/<relative>`). Operations
 | **pi-multi-provider-manager** | Multi-account provider extension for ChatGPT/Codex, Fireworks AI, and Z.ai | [`pi-multi-provider-manager/`](./pi-multi-provider-manager/) |
 | **pi-container-sandbox** | Runs every agent operation inside an isolated Linux container | [`pi-container-sandbox/`](./pi-container-sandbox/) |
 | **pi-sandbox-proxy** | Security proxy with approval flows, vulnerability scanning, and supply chain enforcement | [`pi-sandbox-proxy/`](./pi-sandbox-proxy/) |
-| **pi-thegreataxios-staples** | Personal staples: protected paths (blocks write/edit to .env, .git, node_modules) + plan mode (read-only exploration with step tracking) | [`pi-thegreataxios-staples/`](./pi-thegreataxios-staples/) |
+| **pi-protected-paths** | Blocks write/edit/read to .env, .git, node_modules, SSH keys, credentials, and other sensitive files | [`pi-protected-paths/`](./pi-protected-paths/) |
 
 See each package's `AGENTS.md` for detailed architecture, commands, and quick start.

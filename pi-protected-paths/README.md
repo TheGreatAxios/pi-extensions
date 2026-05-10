@@ -1,6 +1,6 @@
 # pi-protected-paths
 
-Safety net extension for [pi](https://pi.dev). Blocks `write`/`edit` operations to sensitive files so your coding agent doesn't accidentally corrupt critical project files.
+Safety net extension for [pi](https://pi.dev). Blocks `write`/`edit`/`read` operations to sensitive files so your coding agent doesn't accidentally corrupt critical project files or leak secrets.
 
 ## Install
 
@@ -34,7 +34,35 @@ For the full table, see [AGENTS.md](./AGENTS.md).
 
 ## How it works
 
-Hooks into pi's `tool_call` event. When a `write` or `edit` targets a protected path, it returns `{ block: true, reason: "..." }` and (if UI is available) shows a warning notification.
+Hooks into pi's `tool_call` event with two layers:
+
+### Write/Edit Protection
+When a `write` or `edit` tool call targets a protected path, it returns `{ block: true }` and shows a warning notification.
+
+### Bash Read Protection (NEW)
+Agents commonly **bypass** write/edit restrictions by using shell tools (`cat`, `grep`, `head`, `cp`, etc.) to read protected files directly. Protected-paths now intercepts every **`bash`** tool call and checks whether the command references a protected path as a **read target** — blocking it before execution.
+
+Detected patterns:
+| Pattern | Example | Blocked? |
+|---------|---------|----------|
+| Read command + path | `cat .env`, `grep KEY .env` | ✅ |
+| Input redirection | `< .env`, `cat < .env` | ✅ |
+| Shell sourcing | `source .env`, `. ./.env` | ✅ |
+| Copy/move of protected file | `cp .env /tmp/`, `mv .env ../` | ✅ |
+| Command substitution | `echo $(cat .env)` | ✅ |
+| Sandbox-prefixed | `cat /workspace/typescript/.env` | ✅ |
+| `.env.example` (template) | `cat .env.example` | ❌ (allowed) |
+
+### Combining with pi-sandbox-proxy
+
+Use alongside [pi-sandbox-proxy](../pi-sandbox-proxy/) for defense-in-depth:
+- **Protected paths** blocks local file reads of secrets via bash
+- **Proxy** gates all network operations (vuln scanning, approval flows)
+- **Container sandbox** isolates filesystem operations in Docker
+
+```bash
+pi -e ./index.ts -e ../pi-sandbox-proxy/index.ts -e ../pi-container-sandbox/index.ts
+```
 
 ## Architecture
 

@@ -1,7 +1,7 @@
 {
 	"name": "pi-protected-paths",
 	"version": "0.1.0",
-	"description": "Blocks write/edit to sensitive files (.env, .git, node_modules, SSH keys, credentials, and more)",
+	"description": "Blocks write/edit/read of sensitive files (.env, .git, node_modules, SSH keys, credentials, and more)",
 	"license": "MIT",
 	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
 	"repository": {
