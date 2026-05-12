@@ -341,10 +341,15 @@ function refreshAccountProviders(pi: ExtensionAPI) {
 		if (kind === "codex" || kind === "chatgpt") {
 			registerCodexProvider(pi, account);
 		} else if (kind === "fireworks") {
+			// Always use this single model; hides all SDK default models
+			const models = [{
+				name: `${account.label} · accounts/fireworks/routers/kimi-k2p6-turbo`,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			}];
 			pi.registerProvider(providerId, {
 				baseUrl: "https://api.fireworks.ai/inference/v1",
 				api: "openai-completions",
-				models: FIREWORKS_MODELS.map((m) => ({ ...m, name: `${account.label} · ${m.name}`, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })),
+				models,
 				oauth: {
 					name: `${displayKind(kind)}: ${account.label}`,
 					login: (callbacks: OAuthLoginCallbacks) => apiKeySingleAccountLogin("fireworks", account, callbacks),
@@ -396,7 +401,7 @@ export default function accountsExtension(pi: ExtensionAPI) {
 					return;
 				}
 
-				if (choice === "📋 List accounts") {
+					if (choice === "📋 List accounts") {
 					ctx.ui.notify(accounts.map((account) => {
 						const kind = accountKind(account);
 						const suffix = account.apiKeyEnv ? ` ($${account.apiKeyEnv})` : "";
