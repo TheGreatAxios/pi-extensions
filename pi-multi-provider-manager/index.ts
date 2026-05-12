@@ -12,7 +12,7 @@
  *   /login  → pick "Codex: <label>", "Fireworks: <label>", or "Z.ai: <label>"
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai";
 
@@ -342,8 +342,13 @@ function refreshAccountProviders(pi: ExtensionAPI) {
 			registerCodexProvider(pi, account);
 		} else if (kind === "fireworks") {
 			// Always use this single model; hides all SDK default models
-			const models = [{
+			const models: ProviderModelConfig[] = [{
+				id: "accounts/fireworks/routers/kimi-k2p6-turbo",
 				name: `${account.label} · accounts/fireworks/routers/kimi-k2p6-turbo`,
+				reasoning: true,
+				input: ["text", "image"],
+				contextWindow: 262000,
+				maxTokens: 262000,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			}];
 			pi.registerProvider(providerId, {
