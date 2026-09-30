@@ -1,6 +1,6 @@
 # pi-container-sandbox
 
-Container isolation extension for [pi](https://pi.dev). Intercepts every `read`, `write`, `edit`, and `bash` operation and runs it inside an isolated Linux container (Docker).
+Container isolation extension for [pi](https://pi.dev). Intercepts every `read`, `write`, `edit`, and `bash` operation and runs it inside an isolated Linux container (Apple `container` or Docker).
 
 ## Quick Start
 

@@ -1,6 +1,6 @@
 # pi-container-sandbox
 
-Personal pi extension that runs `read`, `write`, `edit`, `bash`, and `user_bash` inside a Docker sandbox.
+Personal pi extension that runs `read`, `write`, `edit`, `bash`, and `user_bash` inside a container sandbox (Apple `container` or Docker).
 
 - Host project cwd is mounted read-write at `/workspace`
 - Agent runs as non-root `pi` user
@@ -37,6 +37,24 @@ All UI commands live under `/sandbox`:
 
 No `/sandbox-*` aliases are registered.
 
+## Apple `container` runtime
+
+Runs each sandbox as its own lightweight VM (Apple `container`, macOS 26, Apple silicon). Auto-detected first; force with `--container-runtime apple|docker`.
+
+```bash
+container system start
+pi -e ./index.ts --container-runtime apple
+```
+
+What the Apple runtime applies:
+
+- `--user 1000:1000 --cap-drop ALL`, `-m/-c` from the size tier, `--container-pids-limit` as `--ulimit nproc`. Swap and disk limits are not applied.
+- **Fail-closed:** if the sandbox cannot start, `read`/`write`/`edit`/`bash` refuse instead of running on the host. `--container-optional` opts back into host fallback.
+- **Read-only paths** inside `/workspace`: `.git`, `.envrc`, `.vscode`, `.pi` (only those that exist). Nested read-only paths can be bypassed by renaming their parent, so `.git` is protected as a whole; the agent cannot commit inside the sandbox. `--container-protect a,b` overrides the list, `--container-git-writable` drops `.git` (re-enables hook/config planting).
+- **Networking:** `--container-offline` (or `--container-net=false`) attaches the sandbox to an auto-created `--internal` network with no DNS: no internet route, but the host gateway is still reachable, so anything on the Mac listening on `0.0.0.0` is exposed (block it with `pf`). `--container-network <name>` + `--container-proxy <url>` route egress through an allowlist proxy on the network gateway. `--container-dns <ip>` sets the resolver on the default network.
+
+Note: pi has no `--no-<flag>` negation, so `--no-container-net` is rejected as an unknown option; use `--container-offline`.
+
 ## Image version/update flow
 
 Default image: `thegreataxios/pi-sandbox:latest`.
@@ -69,6 +87,12 @@ After `/sandbox update`, restart pi. Existing containers keep using the old imag
 | Flag | Purpose |
 |---|---|
 | `--no-container`, `--noc` | Disable sandbox |
+| `--container-runtime apple\|docker` | Choose runtime (default: auto, Apple first) |
+| `--container-optional` | Run on the host if the sandbox can't start (default: refuse) |
+| `--container-offline` | No network (Apple: `--internal` network, no DNS) |
+| `--container-protect <paths>` | Apple: read-only paths under `/workspace` (default `.git,.envrc,.vscode,.pi`) |
+| `--container-git-writable` | Apple: don't protect `.git` |
+| `--container-network <name>`, `--container-proxy <url>`, `--container-dns <ip>` | Apple: network attachment, egress proxy, resolver |
 | `--container-size xs\|sm\|md\|lg\|xlg\|xxlg` | Resource tier (`sm` default) |
 | `--sandbox-name <name>` | Reattach/reuse named container |
 | `--sandbox-persist` | Keep reusable container running after pi exits |
