@@ -140,10 +140,10 @@ function loadSandboxConfig(hostCwd: string): SandboxConfig | null {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime abstraction (Docker only for now)
+// Runtime abstraction (Apple `container` and Docker)
 // ---------------------------------------------------------------------------
 
-type RuntimeKind = "docker";
+type RuntimeKind = "apple" | "docker";
 
 interface Runtime {
 	kind: RuntimeKind;
@@ -158,8 +158,14 @@ interface Runtime {
 	isRunning(name: string): Promise<boolean>;
 	/** Start an existing stopped container. */
 	start(name: string): Promise<boolean>;
-	/** Create a Docker volume if it doesn't exist (Docker only). Apple container returns false. */
+	/** Create a volume if it doesn't exist. */
 	createVolume(name: string): Promise<boolean>;
+	/** Pull an image from the registry. */
+	pull(image: string, timeoutMs: number): Promise<{ code: number | null; timedOut: boolean }>;
+	/** Does a container (running or stopped) with this name exist? */
+	containerExists(name: string): Promise<boolean>;
+	/** Cheap liveness check of the runtime daemon (no image pull, no container start). */
+	ready(): Promise<boolean>;
 }
 
 interface MountSpec {
@@ -184,8 +190,16 @@ interface RunArgs {
 		swap?: string;    // e.g., "1g", "0" to disable (Docker only)
 		disk?: string;    // disk/storage limit (e.g., "10g", "20gb")
 	};
-	/** Optional Docker volume to mount at /cache for persistent caching. */
+	/** Optional volume to mount at /cache for persistent caching. */
 	cacheVolume?: string;
+	/** Apple runtime: paths (relative to /workspace) mounted read-only inside the container. */
+	protectedPaths?: string[];
+	/** Apple runtime: named network to attach to (used for the no-egress `--internal` network). */
+	network?: string;
+	/** Apple runtime: HTTP(S) proxy URL exported to the container (http_proxy/https_proxy). */
+	proxy?: string;
+	/** Apple runtime: DNS server for the container (default network only). */
+	dns?: string;
 }
 
 function randomSuffix(): string {
@@ -208,36 +222,20 @@ function which(bin: string): boolean {
 	return r.status === 0;
 }
 
-async function detectRuntime(ctx?: any): Promise<Runtime | null> {
-	const haveDocker = which("docker");
-
-	if (!haveDocker) {
-		return null;
-	}
-
-	const runtime = dockerRuntime();
-
-	// Test the runtime with a quick 3s smoke test
-	const testName = `pi-test-${randomSuffix()}`;
-	try {
-		const r = await spawnWithTimeout(runtime.bin, ["run", "-d", "--rm", "--name", testName, "debian:13.4-slim", "sleep", "infinity"], 3000);
-		if (r.code === 0 && !r.timedOut) {
-			// Clean up test container
-			runtime.stop(testName);
-			if (ctx?.ui) {
-				ctx.ui.notify(`Using docker runtime (3s smoke test passed)`, "info");
-			}
+async function detectRuntime(prefer: string | undefined, ctx?: any): Promise<Runtime | null> {
+	const order: RuntimeKind[] = prefer === "docker" ? ["docker"] : prefer === "apple" ? ["apple"] : ["apple", "docker"];
+	for (const kind of order) {
+		const bin = kind === "apple" ? "container" : "docker";
+		if (!which(bin)) continue;
+		const runtime = kind === "apple" ? appleRuntime() : dockerRuntime();
+		// Liveness only. The old 3s "pull and run debian" smoke test failed whenever the image wasn't
+		// cached and made the extension silently run without a sandbox.
+		if (await runtime.ready()) {
+			ctx?.ui?.notify(`Using ${kind} runtime`, "info");
 			return runtime;
 		}
-		if (r.timedOut) {
-			if (ctx?.ui) {
-				ctx.ui.notify(`docker runtime timed out (3s)`, "warning");
-			}
-		}
-	} catch {
-		// Fall through
+		ctx?.ui?.notify(`${kind} runtime found but not ready (${kind === "apple" ? "run `container system start`" : "is Docker running?"})`, "warning");
 	}
-
 	return null;
 }
 
@@ -276,11 +274,136 @@ function spawnWithTimeout(
 	});
 }
 
+/** Internal (host-only, no internet) network used when the sandbox has network disabled. */
+const APPLE_INTERNAL_NET = "pi-sbx-internal";
+
+function appleRuntime(): Runtime {
+	const bin = "container";
+	const forceDelete = (name: string) => {
+		spawnSync(bin, ["delete", "--force", name], { stdio: "ignore" });
+	};
+	const inspectState = async (name: string): Promise<string | null> => {
+		const r = await spawnWithTimeout(bin, ["inspect", name], 8000);
+		if (r.code !== 0 || r.timedOut) return null;
+		try {
+			const d = JSON.parse(r.stdout);
+			return d?.[0]?.status?.state ?? "unknown";
+		} catch {
+			return "unknown";
+		}
+	};
+	return {
+		kind: "apple",
+		bin,
+		ready: async () => {
+			const r = await spawnWithTimeout(bin, ["system", "status"], 8000);
+			return r.code === 0 && !r.timedOut;
+		},
+		exists: async (image) => {
+			const r = await spawnWithTimeout(bin, ["image", "inspect", image], 10000);
+			return r.code === 0 && !r.timedOut;
+		},
+		pull: async (image, timeoutMs) => {
+			const r = await spawnWithTimeout(bin, ["image", "pull", "--platform", "linux/arm64", "--progress", "none", image], timeoutMs);
+			return { code: r.code, timedOut: r.timedOut };
+		},
+		containerExists: async (name) => (await inspectState(name)) !== null,
+		stop: (name) => {
+			spawnSync(bin, ["stop", name], { stdio: "ignore" });
+		},
+		remove: (name) => forceDelete(name),
+		isRunning: async (name) => (await inspectState(name)) === "running",
+		start: async (name) => {
+			const r = await spawnWithTimeout(bin, ["start", name], 30000);
+			return r.code === 0 && !r.timedOut;
+		},
+		createVolume: async (name) => {
+			const r = await spawnWithTimeout(bin, ["volume", "create", name], 10000);
+			return r.code === 0 && !r.timedOut;
+		},
+		run: async ({ name, image, hostCwd, allowNetwork, extraMounts, resources, cacheVolume, protectedPaths, network, proxy, dns }) => {
+			const memory = resources?.memory ?? "2g";
+			const cpus = resources?.cpus ?? "2";
+			const pidsLimit = resources?.pidsLimit ?? 512;
+
+			// Network: default network when allowed; otherwise an --internal network
+			// (no internet route; host gateway only, see README for pf hardening).
+			let netName = network;
+			if (!allowNetwork && !netName) {
+				netName = APPLE_INTERNAL_NET;
+				const c = await spawnWithTimeout(bin, ["network", "create", "--internal", netName], 15000);
+				if (c.code !== 0 && !/already exists/i.test(c.stderr + c.stdout)) {
+					throw new Error(`could not create internal network ${netName}: ${(c.stderr || c.stdout).trim()}`);
+				}
+			}
+
+			const buildArgs = (n: string): string[] => {
+				const a: string[] = [
+					"run", "-d",
+					"--name", n,
+					"--user", "1000:1000",
+					"-m", memory,
+					"-c", cpus,
+					"--cap-drop", "ALL",
+					"--ulimit", `nproc=${pidsLimit}:${pidsLimit}`,
+					"--mount", `type=bind,source=${hostCwd},target=/workspace`,
+					"-w", "/workspace",
+				];
+				// Protected paths must exist before start (each becomes its own mount).
+				for (const rel of protectedPaths ?? []) {
+					if (existsSync(resolvePath(hostCwd, rel))) a.push("--read-only-path", `/workspace/${rel}`);
+				}
+				for (const m of extraMounts ?? []) {
+					a.push("--mount", `type=bind,source=${m.source},target=${m.target},readonly`);
+				}
+				if (cacheVolume) a.push("-v", `${cacheVolume}:/cache`);
+				if (netName) a.push("--network", netName);
+				if (!allowNetwork || proxy) a.push("--no-dns");
+				else if (dns) a.push("--dns", dns);
+				if (proxy) {
+					for (const k of ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]) a.push("-e", `${k}=${proxy}`);
+					a.push("-e", "no_proxy=localhost,127.0.0.1");
+				}
+				a.push(image, "sleep", "infinity");
+				return a;
+			};
+
+			// Apple's CLI can report a container as "not found" for delete and
+			// "already exists" for run; retry with a fresh name in that case.
+			forceDelete(name);
+			let currentName = name;
+			let lastErr = "";
+			for (let attempt = 0; attempt < 5; attempt++) {
+				const r = await spawnWithTimeout(bin, buildArgs(currentName), 90000);
+				if (r.timedOut) throw new Error(`container run timed out after 90s (${currentName})`);
+				if (r.code === 0) return currentName;
+				lastErr = (r.stderr || r.stdout || "").trim();
+				if (!/already exists/i.test(lastErr)) throw new Error(`container run failed: ${lastErr}`);
+				if (attempt === 0) forceDelete(currentName);
+				else currentName = `pi-sbx-${randomSuffix()}`;
+			}
+			throw new Error(`container run failed: ${lastErr}`);
+		},
+	};
+}
+
 function dockerRuntime(): Runtime {
 	const bin = "docker";
 	return {
 		kind: "docker",
 		bin,
+		pull: async (image, timeoutMs) => {
+			const r = await spawnWithTimeout(bin, ["pull", image], timeoutMs);
+			return { code: r.code, timedOut: r.timedOut };
+		},
+		containerExists: async (name) => {
+			const r = await spawnWithTimeout(bin, ["inspect", "--format", "exists", name], 5000);
+			return r.code === 0 && !r.timedOut;
+		},
+		ready: async () => {
+			const r = await spawnWithTimeout(bin, ["info", "--format", "{{.ServerVersion}}"], 8000);
+			return r.code === 0 && !r.timedOut;
+		},
 		exists: async (image) => {
 			const r = await spawnWithTimeout(bin, ["image", "inspect", image], 10000);
 			return r.code === 0 && !r.timedOut;
@@ -385,6 +508,9 @@ interface Sandbox {
 }
 
 let sandbox: Sandbox | null = null;
+/** Fail-closed: when true and no sandbox is running, tools refuse to run instead of falling back to the host. */
+let sandboxRequired = false;
+let sandboxError: string | null = null;
 let pathApprovals: PathApprovalStore | null = null;
 const getSbx = () => sandbox;
 
@@ -538,6 +664,11 @@ function imageRefForTag(image: string, tag: string): string {
 }
 
 async function inspectLocalImageDigest(runtime: Runtime, imageRef: string): Promise<string | null> {
+	if (runtime.kind === "apple") {
+		const r = await spawnWithTimeout(runtime.bin, ["image", "inspect", imageRef], 10000);
+		if (r.code !== 0 || r.timedOut) return null;
+		return r.stdout.match(/"digest"\s*:\s*"(sha256:[0-9a-f]{64})"/)?.[1] ?? null;
+	}
 	const result = await spawnWithTimeout(runtime.bin, ["image", "inspect", imageRef, "--format", "{{json .RepoDigests}}"], 10000);
 	if (result.code !== 0 || result.timedOut) return null;
 	try {
@@ -1005,6 +1136,36 @@ export default function (pi: ExtensionAPI) {
 		type: "boolean",
 		default: false,
 	});
+	pi.registerFlag("container-runtime", {
+		description: "Container runtime: apple | docker (default: auto, prefers apple)",
+		type: "string",
+	});
+	pi.registerFlag("container-optional", {
+		description: "If the sandbox can\'t start, run tools on the HOST instead of refusing (unsafe; default: refuse)",
+		type: "boolean",
+		default: false,
+	});
+	pi.registerFlag("container-protect", {
+		description: "Apple runtime: comma-separated /workspace-relative paths mounted read-only (default: .git,.envrc,.vscode,.pi)",
+		type: "string",
+	});
+	pi.registerFlag("container-git-writable", {
+		description: "Apple runtime: don\'t protect .git (lets the agent commit, but allows hook/config planting)",
+		type: "boolean",
+		default: false,
+	});
+	pi.registerFlag("container-network", {
+		description: "Apple runtime: attach to this existing container network (e.g. an --internal net paired with --container-proxy)",
+		type: "string",
+	});
+	pi.registerFlag("container-proxy", {
+		description: "Apple runtime: HTTP(S) proxy URL for the sandbox (implies --no-dns; pair with an --internal network + pf)",
+		type: "string",
+	});
+	pi.registerFlag("container-dns", {
+		description: "Apple runtime: DNS server for the sandbox on the default network (e.g. 1.1.1.1)",
+		type: "string",
+	});
 	pi.registerFlag("container-size", {
 		description: "Sandbox size tier: xs, sm (default), md, lg, xlg, xxlg. Sets memory, swap, cpu, disk limits.",
 		type: "string",
@@ -1026,6 +1187,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerFlag("container-image", {
 		description: "Image to use for the sandbox (default: thegreataxios/pi-sandbox:latest)",
 		type: "string",
+	});
+	pi.registerFlag("container-offline", {
+		description: "Disable sandbox networking (Apple: runs on an --internal network with no internet route). Same as --container-net=false.",
+		type: "boolean",
+		default: false,
 	});
 	pi.registerFlag("container-net", {
 		description: "Allow outbound network from the sandbox (default: on; use --no-container-net to disable)",
@@ -1077,6 +1243,16 @@ export default function (pi: ExtensionAPI) {
 		type: "string",
 	});
 
+	/** Throws when the sandbox is required but not running, so tools never silently touch the host. */
+	function assertNotFailClosed(): void {
+		if (sandboxRequired) {
+			throw new Error(
+				`sandbox is required but not running${sandboxError ? ` (${sandboxError})` : ""}. Refusing to run on the host. ` +
+				`Fix the sandbox or start pi with --container-optional / --no-container.`,
+			);
+		}
+	}
+
 	const localCwd = process.cwd();
 	const localRead = createReadTool(localCwd);
 	const localWrite = createWriteTool(localCwd);
@@ -1113,7 +1289,7 @@ export default function (pi: ExtensionAPI) {
 		...localRead,
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const sbx = getSbx();
-			if (!sbx) return localRead.execute(id, params, signal, onUpdate);
+			if (!sbx) { assertNotFailClosed(); return localRead.execute(id, params, signal, onUpdate); }
 			await guardExternalRead(params.path, sbx, _ctx);
 			const tool = createReadTool(localCwd, { operations: readOps(sbx) });
 			return tool.execute(id, params, signal, onUpdate);
@@ -1123,7 +1299,7 @@ export default function (pi: ExtensionAPI) {
 		...localWrite,
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const sbx = getSbx();
-			if (!sbx) return localWrite.execute(id, params, signal, onUpdate);
+			if (!sbx) { assertNotFailClosed(); return localWrite.execute(id, params, signal, onUpdate); }
 			const tool = createWriteTool(localCwd, { operations: writeOps(sbx) });
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -1132,7 +1308,7 @@ export default function (pi: ExtensionAPI) {
 		...localEdit,
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const sbx = getSbx();
-			if (!sbx) return localEdit.execute(id, params, signal, onUpdate);
+			if (!sbx) { assertNotFailClosed(); return localEdit.execute(id, params, signal, onUpdate); }
 			const tool = createEditTool(localCwd, { operations: editOps(sbx) });
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -1142,7 +1318,7 @@ export default function (pi: ExtensionAPI) {
 		label: "bash (sandboxed)",
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const sbx = getSbx();
-			if (!sbx) return localBash.execute(id, params, signal, onUpdate);
+			if (!sbx) { assertNotFailClosed(); return localBash.execute(id, params, signal, onUpdate); }
 			const tool = createBashTool(localCwd, { operations: bashOps(sbx) });
 			return tool.execute(id, params, signal, onUpdate);
 		},
@@ -1150,7 +1326,19 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("user_bash", () => {
 		const sbx = getSbx();
-		if (!sbx) return;
+		if (!sbx) {
+			if (sandboxRequired) {
+				return {
+					operations: {
+						exec: async () => {
+							assertNotFailClosed();
+							return { exitCode: 1 };
+						},
+					} as any,
+				};
+			}
+			return;
+		}
 		return { operations: bashOps(sbx) };
 	});
 
@@ -1177,10 +1365,24 @@ export default function (pi: ExtensionAPI) {
 		if ((pi.getFlag("no-container") as boolean) || (pi.getFlag("noc") as boolean)) return;
 		if (!(pi.getFlag("container") as boolean)) return;
 
+		sandboxRequired = !(pi.getFlag("container-optional") as boolean);
+		sandboxError = null;
+		const failStart = (msg: string) => {
+			sandboxError = msg;
+			ctx.ui.notify(
+				sandboxRequired
+					? `Sandbox unavailable: ${msg}\nTools will REFUSE to run (fail-closed). Use --container-optional or --no-container to run on the host.`
+					: `Sandbox unavailable: ${msg}\nRunning WITHOUT sandbox (--container-optional).`,
+				sandboxRequired ? "error" : "warning",
+			);
+		};
+
+		let createdName: string | null = null;
+		let createdRuntime: Runtime | null = null;
 		try {
-			const runtime = await detectRuntime(ctx);
+			const runtime = await detectRuntime(pi.getFlag("container-runtime") as string | undefined, ctx);
 			if (!runtime) {
-				ctx.ui.notify("Docker not available or timed out. Running without sandbox.", "warning");
+				failStart("no working container runtime (Apple `container` or Docker)");
 				return;
 			}
 
@@ -1197,7 +1399,10 @@ export default function (pi: ExtensionAPI) {
 			const flagImage = pi.getFlag("container-image") as string | undefined;
 			const configImageRef = imageRefForTag(projectConfig.image, projectConfig.tag);
 			const image = flagImage || configImageRef || "thegreataxios/pi-sandbox:latest";
-			const allowNetwork = (pi.getFlag("container-net") as boolean) || (pi.getFlag("prawl") as boolean) || (pi.getFlag("browser") as boolean);
+			// pi has no `--no-<flag>` negation, and `--container-net=false` arrives as the truthy string "false".
+			const asBool = (v: unknown) => v === true || (typeof v === "string" && !/^(false|0|off|no|)$/i.test(v));
+			const offline = asBool(pi.getFlag("container-offline"));
+			const allowNetwork = !offline && (asBool(pi.getFlag("container-net")) || asBool(pi.getFlag("prawl")) || asBool(pi.getFlag("browser")));
 			const keep = pi.getFlag("container-keep") as boolean;
 			const persist = pi.getFlag("sandbox-persist") as boolean || config?.persist || false;
 			const mountSkills = pi.getFlag("container-mount-skills") as boolean;
@@ -1235,10 +1440,7 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`🔄 Reattaching to existing sandbox: ${sandboxName}`, "info");
 				} else {
 					// Check if container exists at all (stopped state)
-					const inspect = await spawnWithTimeout(
-						runtime.bin, ["inspect", "--format", "exists", sandboxName], 5000,
-					);
-					if (inspect.code === 0 && !inspect.timedOut) {
+					if (await runtime.containerExists(sandboxName)) {
 						// Container exists but is not running
 						if (isReusable || persist) {
 							// Reusable or persist mode → start the stopped container
@@ -1262,12 +1464,9 @@ export default function (pi: ExtensionAPI) {
 
 			if (!(await runtime.exists(image))) {
 				ctx.ui.notify(`Sandbox image "${image}" not found locally, pulling from registry...`);
-				const pull = await spawnWithTimeout(runtime.bin, ["pull", image], 120000);
+				const pull = await runtime.pull(image, 900000);
 				if (!pull || pull.code !== 0 || pull.timedOut) {
-					ctx.ui.notify(
-						`Sandbox image "${image}" not found. Pull failed. Build it manually:\n  docker build -t ${image} -f docker/Dockerfile docker`,
-						"error",
-					);
+					failStart(`image "${image}" not found and pull failed. Build it: ${runtime.bin} build -t ${image} -f docker/Dockerfile docker`);
 					return;
 				}
 			}
@@ -1298,6 +1497,14 @@ export default function (pi: ExtensionAPI) {
 			if (pidsFlag !== undefined) resources.pidsLimit = pidsFlag;
 			if (swapFlag !== undefined) resources.swap = swapFlag;
 
+			// Read-only paths inside /workspace (Apple runtime). A nested read-only path can be bypassed by
+			// renaming its parent, so protecting `.git` as a whole is what actually stops hook/config planting.
+			const protectFlag = pi.getFlag("container-protect") as string | undefined;
+			let protectedPaths = protectFlag
+				? protectFlag.split(",").map((p) => p.trim().replace(/^\/+|\/+$/g, "")).filter(Boolean)
+				: [".git", ".envrc", ".vscode", ".pi"];
+			if (pi.getFlag("container-git-writable") as boolean) protectedPaths = protectedPaths.filter((p) => p !== ".git");
+
 			// Create new sandbox if not reattaching
 			let actualName = sandboxName;
 			if (!isReattached) {
@@ -1309,7 +1516,13 @@ export default function (pi: ExtensionAPI) {
 					extraMounts: skillMounts.length ? skillMounts : undefined,
 					resources,
 					cacheVolume,
+					protectedPaths,
+					network: (pi.getFlag("container-network") as string | undefined) || undefined,
+					proxy: (pi.getFlag("container-proxy") as string | undefined) || undefined,
+					dns: (pi.getFlag("container-dns") as string | undefined) || undefined,
 				});
+				createdName = actualName;
+				createdRuntime = runtime;
 			}
 
 			sandbox = {
@@ -1368,7 +1581,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.theme.fg("accent", `${statusPrefix}: ${actualName} (net=${allowNetwork ? "on" : "off"})${resStr}`),
 			);
 			ctx.ui.notify(
-				`${statusPrefix}: docker ${actualName}${resStr}${isReusable ? " [re-usable]" : ""}\n${ok}${skillMounts.length ? `\nSkills mounted: ${skillMounts.map((m) => m.target).join(", ")}` : ""}${cacheVolume ? `\nCache volume: ${cacheVolume} at /cache` : ""}`,
+				`${statusPrefix}: ${runtime.kind} ${actualName}${resStr}${isReusable ? " [re-usable]" : ""}\n${ok}${skillMounts.length ? `\nSkills mounted: ${skillMounts.map((m) => m.target).join(", ")}` : ""}${cacheVolume ? `\nCache volume: ${cacheVolume} at /cache` : ""}`,
 				"info"
 			);
 
@@ -1412,8 +1625,11 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		} catch (e) {
+			if (createdName && createdRuntime) {
+				try { createdRuntime.stop(createdName); createdRuntime.remove(createdName); } catch {}
+			}
 			sandbox = null;
-			ctx.ui.notify(`Sandbox init failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+			failStart(`init failed: ${e instanceof Error ? e.message : String(e)}`);
 		}
 	});
 
@@ -1538,8 +1754,12 @@ export default function (pi: ExtensionAPI) {
 		const cfg = loadSandboxProjectConfig(hostCwd);
 		const imageRef = imageRefForTag(cfg.image, cfg.tag);
 
-		// Detect runtime (Docker) — works without an active sandbox container
-		const runtime = dockerRuntime();
+		// Detect runtime — works without an active sandbox container
+		const runtime = await detectRuntime(pi.getFlag("container-runtime") as string | undefined, ctx);
+		if (!runtime) {
+			ctx.ui.notify("No working container runtime (Apple `container` or Docker).", "error");
+			return;
+		}
 
 		// 1. Check if image already exists locally
 		const localDigest = await inspectLocalImageDigest(runtime, imageRef);
@@ -1555,7 +1775,7 @@ export default function (pi: ExtensionAPI) {
 
 		// 2. Pull the image
 		ctx.ui.notify(`⬇ Installing sandbox image: ${imageRef}...`);
-		const pull = await spawnWithTimeout(runtime.bin, ["pull", imageRef], 180000);
+		const pull = await runtime.pull(imageRef, 900000);
 		if (pull.code !== 0 || pull.timedOut) {
 			ctx.ui.notify(
 				`❌ Failed to pull ${imageRef}.\n` +
@@ -1609,7 +1829,7 @@ export default function (pi: ExtensionAPI) {
 		const imageRef = imageRefForTag(cfg.image, cfg.tag);
 
 		ctx.ui.notify(`⬇ Pulling ${imageRef}...`);
-		const pull = await spawnWithTimeout(sbx.runtime.bin, ["pull", imageRef], 120000);
+		const pull = await sbx.runtime.pull(imageRef, 900000);
 		if (pull.code !== 0 || pull.timedOut) {
 			ctx.ui.notify(`❌ Failed to pull ${imageRef}.`, "error");
 			return;
