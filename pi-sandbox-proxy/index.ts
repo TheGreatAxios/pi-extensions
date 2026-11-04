@@ -248,7 +248,7 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Slash commands ---
 
-		pi.registerCommand("proxy", {
+	pi.registerCommand("proxy", {
 		description: "Show security proxy status (approvals, blocked count, config)",
 		handler: async (_args, ctx) => {
 			const approvals = store.list();

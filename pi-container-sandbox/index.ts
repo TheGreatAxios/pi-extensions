@@ -68,6 +68,7 @@ import {
 	type EditOperations,
 	type ExtensionAPI,
 	type ExtensionUIContext,
+	CONFIG_DIR_NAME,
 	getAgentDir,
 	type ReadOperations,
 	type WriteOperations,
@@ -125,7 +126,7 @@ interface SandboxConfig {
 }
 
 function loadSandboxConfig(hostCwd: string): SandboxConfig | null {
-	const configPath = resolvePath(hostCwd, ".pi", "config.json");
+	const configPath = resolvePath(hostCwd, CONFIG_DIR_NAME, "config.json");
 	if (!existsSync(configPath)) return null;
 	try {
 		const content = readFileSync(configPath, "utf-8");
@@ -499,7 +500,7 @@ const DEFAULT_SANDBOX_PROJECT_CONFIG: SandboxProjectConfig = {
 };
 
 function getSandboxConfigPath(hostCwd: string): string {
-	return resolvePath(hostCwd, ".pi", "agent", "sandbox.json");
+	return resolvePath(hostCwd, CONFIG_DIR_NAME, "agent", "sandbox.json");
 }
 
 function loadSandboxProjectConfig(hostCwd: string): SandboxProjectConfig {
@@ -954,7 +955,7 @@ function discoverSkillDirs(additionalPaths?: string[]): MountSpec[] {
 	const skillRoots = [
 		...additionalPaths ?? [],
 		resolvePath(home, ".agents", "skills"),
-		resolvePath(home, ".pi", "agent", "skills"),
+		resolvePath(getAgentDir(), "skills"),
 	];
 
 	const mounts: MountSpec[] = [];

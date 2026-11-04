@@ -16,7 +16,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { protectedPaths } from "./features/protected-paths.js";
+import { protectedPaths } from "./features/protected-paths";
 
 export default function (pi: ExtensionAPI) {
 	protectedPaths(pi);

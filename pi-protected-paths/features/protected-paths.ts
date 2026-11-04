@@ -21,45 +21,54 @@
 
 import type { ExtensionAPI, BashToolCallEvent } from "@earendil-works/pi-coding-agent";
 
+export interface BlockDecision {
+	block: boolean;
+	path: string;
+	reason: string;
+}
+
+export function shouldBlockTool(
+	toolName: string,
+	input: Record<string, unknown>,
+): BlockDecision | null {
+	if (toolName === "write" || toolName === "edit" || toolName === "read") {
+		const path = typeof input.path === "string" ? input.path : "";
+		if (path && isProtected(path)) {
+			return {
+				block: true,
+				path,
+				reason: `Path "${path}" is protected`,
+			};
+		}
+		return null;
+	}
+
+	if (toolName === "bash") {
+		const command = typeof input.command === "string" ? input.command : "";
+		const violation = detectProtectedRead(command);
+		if (violation) {
+			return {
+				block: true,
+				path: violation.path,
+				reason: `Reading protected path "${violation.path}" via bash is not allowed (${violation.reason})`,
+			};
+		}
+		return null;
+	}
+
+	return null;
+}
+
 export function protectedPaths(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
-		if (event.toolName === "write" || event.toolName === "edit") {
-			const path = event.input.path as string;
-
-			if (isProtected(path)) {
-				if (ctx.hasUI) {
-					ctx.ui.notify(`Blocked write to protected path: ${path}`, "warning");
-				}
-				return { block: true, reason: `Path "${path}" is protected` };
+		const decision = shouldBlockTool(event.toolName, event.input as Record<string, unknown>);
+		if (decision) {
+			if (ctx.hasUI) {
+				const verb = event.toolName === "bash" ? "read of protected path via bash" : `${event.toolName} to protected path`;
+				ctx.ui.notify(`Blocked ${verb}: ${decision.path}`, "warning");
 			}
-
-			return undefined;
+			return { block: true, reason: decision.reason };
 		}
-
-		// ── Bash read protection ────────────────────────────────────────
-		// Agents commonly bypass write/edit restrictions by using bash tools
-		// (cat, grep, rg, head, cp, etc.) to read protected files.
-		// We detect the protected path in the command string and block it.
-		if (event.toolName === "bash") {
-			const bashEvent = event as BashToolCallEvent;
-			const violation = detectProtectedRead(bashEvent.input.command);
-
-			if (violation) {
-				if (ctx.hasUI) {
-					ctx.ui.notify(
-						`Blocked read of protected path via bash: ${violation.path}`,
-						"warning",
-					);
-				}
-				return {
-					block: true,
-					reason: `Reading protected path "${violation.path}" via bash is not allowed (${violation.reason})`,
-				};
-			}
-
-			return undefined;
-		}
-
 		return undefined;
 	});
 }
@@ -68,7 +77,7 @@ export function protectedPaths(pi: ExtensionAPI) {
  * Check whether a file path matches any protected pattern.
  * Used for write/edit protection AND for bash read detection.
  */
-function isProtected(path: string): boolean {
+export function isProtected(path: string): boolean {
 	// ── Directories (block any file inside) ──────────────────────────────
 	const protections: Array<{ dir: string; reason: string }> = [
 		{ dir: ".git", reason: "version control internals" },
@@ -85,7 +94,7 @@ function isProtected(path: string): boolean {
 	}
 
 	const filename = path.split("/").pop() ?? path;
-	const ext = filename.split(".").pop()?.toLowerCase();
+	const ext = filename.includes(".") ? filename.split(".").pop()?.toLowerCase() : undefined;
 
 	// ── Secrets & environment ────────────────────────────────────────────
 	if (filename === ".env") return true;
@@ -124,10 +133,15 @@ function isProtected(path: string): boolean {
 }
 
 /**
- * Returns true if `path` is `dir`, starts with `dir/`, or contains `/dir/`.
+ * Returns true if `path` is `dir`, starts with `dir/`, ends with `/${dir}`, or contains `/dir/`.
  */
 function isInsideDir(path: string, dir: string): boolean {
-	return path === dir || path.startsWith(`${dir}/`) || path.includes(`/${dir}/`);
+	return (
+		path === dir ||
+		path.startsWith(`${dir}/`) ||
+		path.endsWith(`/${dir}`) ||
+		path.includes(`/${dir}/`)
+	);
 }
 
 // ── Bash read detection ────────────────────────────────────────────────────
@@ -146,7 +160,7 @@ function isInsideDir(path: string, dir: string): boolean {
  *
  * Returns the matched path and reason, or null if no violation.
  */
-function detectProtectedRead(
+export function detectProtectedRead(
 	command: string,
 ): { path: string; reason: string } | null {
 	// Normalize: strip shell comments, collapse whitespace
