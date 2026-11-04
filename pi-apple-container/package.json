@@ -1,31 +1,30 @@
 {
-	"name": "pi-multi-provider-manager",
-	"version": "0.1.3",
-	"description": "Multi-account ChatGPT/Codex OAuth plus Fireworks and Z.ai API-key providers for pi.",
+	"name": "pi-apple-container",
+	"version": "0.1.1",
+	"description": "pi extension: opt-in sandbox via Apple container CLI (alternative to Docker pi-container-sandbox)",
 	"license": "MIT",
 	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/thegreataxios/pi-extensions.git",
-		"directory": "pi-multi-provider-manager"
+		"directory": "pi-apple-container"
 	},
 	"keywords": [
 		"pi-package",
 		"pi-extension",
-		"chatgpt",
-		"fireworks",
-		"zai",
-		"multi-account",
-		"oauth"
+		"sandbox",
+		"container",
+		"apple",
+		"containerization",
+		"security"
 	],
 	"type": "module",
-	"main": "index.ts",
 	"files": [
 		"index.ts",
-		"README.md",
-		"LICENSE"
+		"src/"
 	],
 	"scripts": {
+		"test": "bun test",
 		"check": "tsc --noEmit",
 		"clean": "echo 'nothing to clean'",
 		"prepublishOnly": "bun run check"
@@ -36,7 +35,7 @@
 		]
 	},
 	"dependencies": {
-		"@earendil-works/pi-coding-agent": "^0.74.0"
+		"@earendil-works/pi-coding-agent": "^1.0.0"
 	},
 	"devDependencies": {
 		"@types/node": "^25.6.0",

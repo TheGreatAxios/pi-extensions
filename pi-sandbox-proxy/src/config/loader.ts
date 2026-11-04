@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG } from "./defaults";
 import type { ProxyConfig } from "./types";
 
@@ -19,7 +19,7 @@ export function loadConfig(cwd: string): ProxyConfig {
 	let config = { ...DEFAULT_CONFIG };
 
 	const globalPath = join(getAgentDir(), "proxy.json");
-	const projectPath = join(cwd, ".pi", "proxy.json");
+	const projectPath = join(cwd, CONFIG_DIR_NAME, "proxy.json");
 
 	for (const path of [globalPath, projectPath]) {
 		if (!existsSync(path)) continue;

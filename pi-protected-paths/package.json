@@ -1,6 +1,6 @@
 {
 	"name": "pi-protected-paths",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "Blocks write/edit/read of sensitive files (.env, .git, node_modules, SSH keys, credentials, and more)",
 	"license": "MIT",
 	"author": "Sawyer Cutler <sawyer@dirtroad.dev>",
@@ -36,7 +36,7 @@
 		]
 	},
 	"dependencies": {
-		"@earendil-works/pi-coding-agent": "^0.74.0"
+		"@earendil-works/pi-coding-agent": "^1.0.0"
 	},
 	"devDependencies": {
 		"@types/node": "^25.6.0",

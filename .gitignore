@@ -383,3 +383,4 @@ rustc-ice-*.txt
 .pi/agent/sandbox.json
 .pi/agent/sandbox.json
 **/.pi/agent/sandbox.json
+.agents/
